@@ -41,6 +41,19 @@ test('loads a config and walks every tab without console errors', async ({ page 
   await page.screenshot({ path: `${SHOTS}/5-graph.png`, fullPage: true });
   await page.getByRole('treeitem').last().scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${SHOTS}/6-graph-bottom.png` });
+  // Turning every kind off must not take the controls off screen with the diagram.
+  // A notice that blames "these filters" while unmounting the filters is a dead end:
+  // the only way out was switching tabs, which worked by accident. The chips have to
+  // survive their own effect, and clicking one has to bring the graph back.
+  const kindChip = (k: string) => page.getByRole('button', { name: k, exact: true });
+  for (const k of ['filament', 'process', 'machine']) await kindChip(k).click();
+  await expect(page.getByRole('tree', { name: 'Inheritance forest' })).toBeHidden();
+  await expect(page.getByText('No kinds selected.')).toBeVisible();
+  await expect(kindChip('filament')).toBeVisible();
+  await kindChip('filament').click();
+  await expect(page.getByRole('tree', { name: 'Inheritance forest' })).toBeVisible();
+  for (const k of ['process', 'machine']) await kindChip(k).click();
+
   const firstNode = page.getByRole('treeitem').first();
   await firstNode.focus();
   await page.keyboard.press('ArrowDown');
