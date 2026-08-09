@@ -1,0 +1,12 @@
+node_modules
+dist
+public/sample-config.json
+e2e/screenshots
+test-results
+playwright-report
+*.tsbuildinfo
+
+# Agent tooling copied in from the sibling repo — not adapted to this project,
+# and .mcp.json names internal infrastructure.
+.claude/
+.mcp.json
