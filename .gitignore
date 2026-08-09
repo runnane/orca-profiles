@@ -6,9 +6,10 @@ test-results
 playwright-report
 *.tsbuildinfo
 
-# Agent tooling copied in from the sibling repo — not adapted to this project,
-# and .mcp.json names internal infrastructure.
-.claude/
+# Agent tooling is committed (see AGENTS.md), except:
+#  - local settings, which are per-machine
+#  - .mcp.json, which names internal infrastructure and must not be published
+.claude/settings.local.json
 .mcp.json
 dist-cli
 dist-server
