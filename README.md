@@ -102,6 +102,63 @@ than folding them into "same" — and deliberately never coerces a scalar into a
 vector unless the other side is one, because hiding a real difference is the
 worse failure.
 
+## Which filaments a printer gets, and why
+
+Selecting a printer silently rewrites the filament and process lists, and the
+slicer never says on what grounds. The rule is
+[`Preset::is_compatible_with_printer`](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L809),
+and it is checked in this order:
+
+| | Mechanism |
+|---|---|
+| **excluded by the library** | a filament from the `OrcaFilamentLibrary` vendor whose `m_excluded_from` names this printer **or its parent** — checked first, and on its own ([Preset.cpp:816](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L816)) |
+| **decided by a condition** | `compatible_printers` **empty** and `compatible_printers_condition` non-empty: the condition is the whole answer ([Preset.cpp:826](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L826)) |
+| **compatible with everything** | `compatible_printers` empty and no condition |
+| **named explicitly** | this printer's name is in `compatible_printers` |
+| **named via its parent** | the list names the preset this printer `inherits` — and only for a printer that is **not** a system preset ([Preset.cpp:798](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L798), reached from [:841](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L841)) |
+| **excluded** | the list is non-empty and names neither |
+
+Three of those are counter-intuitive enough to be worth stating plainly.
+
+**A filament naming a vendor printer is offered on your own printer too.** That is
+the `named via its parent` row, and the source says why: "If one filament or
+process preset is compatible with one system printer preset, then we think this
+filament or process preset should be compatible with all user printer preset which
+is inherited from this system printer preset." Model this as name-matching alone
+and you report a working setup as broken.
+
+**An empty list plus a condition is not "compatible with everything".** The two
+are separate cases, so an empty `compatible_printers` is not evidence of anything
+on its own — and it is not an orphaned preset either.
+
+**A condition that fails to evaluate means compatible.** Both compatibility
+functions catch the error and return true, with a `//FIXME` acknowledging it
+([Preset.cpp:832](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L832)).
+A malformed condition does not hide a preset.
+
+Processes gate filaments as a **second** relation, not the same one: a filament's
+`compatible_prints` is checked against the selected *process*, and the two verdicts
+are ANDed
+([Preset.cpp:3364](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L3364)).
+It has no parent clause, and it applies to **filaments only** — processes are
+updated with no active print at all
+([PresetBundle.cpp:5421](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L5421)
+against
+[:5439](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L5439)),
+so a `compatible_prints` on a process is dead weight.
+
+**Conditions are not evaluated.** `compatible_printers_condition` is a
+PlaceholderParser expression over the printer's config, not a name list, and this
+app does not ship a PlaceholderParser. Those come back **undetermined**, with the
+expression shown verbatim — "this depends on a condition we do not evaluate:
+`printer_notes=~/.*ACME.*/`" is a real answer; a guess would not be.
+
+Being the printer's `default_filament_profile` / `default_print_profile` is **not**
+part of this rule: it decides what gets *selected* when you pick the printer
+([PresetBundle.cpp:2142](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L2142)),
+which is a different question, so it is reported alongside a verdict rather than as
+one.
+
 ## Testing it
 
 Three levels, cheapest first.
@@ -245,7 +302,7 @@ proves nothing, since loopback answers either way.
 
 | Path | What |
 |---|---|
-| `src/domain/` | Pure logic: index, resolve, diff, analyze, normalize, redact |
+| `src/domain/` | Pure logic: index, resolve, diff, analyze, compatibility, normalize, redact |
 | `src/source/` | File System Access reader |
 | `src/ui/` | React views |
 | `scripts/make-fixture.mjs` | Generates `fixtures/` — synthetic, gitignored, never a real config |

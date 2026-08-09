@@ -59,7 +59,21 @@ const acmeProcesses = [
 
 const acmeMachines = [
   ['fdm_machine_common', { name: 'fdm_machine_common', ...bulkSettings(3), printable_height: '250' }],
-  ['Acme Cube 0.4 nozzle', { name: 'Acme Cube 0.4 nozzle', inherits: 'fdm_machine_common', printer_model: 'Acme Cube', nozzle_diameter: '0.4' }],
+  // `default_*` name what the slicer selects when this printer is chosen
+  // (PresetBundle.cpp:2142-2166) — which is a different question from what it is
+  // *compatible* with, and the fixture has to be able to tell the two apart.
+  [
+    'Acme Cube 0.4 nozzle',
+    {
+      name: 'Acme Cube 0.4 nozzle',
+      inherits: 'fdm_machine_common',
+      printer_model: 'Acme Cube',
+      nozzle_diameter: '0.4',
+      printer_notes: 'ACME_CUBE_V1',
+      default_print_profile: '0.20mm Standard @Acme',
+      default_filament_profile: ['Acme PLA @System'],
+    },
+  ],
 ];
 
 for (const [, p] of acmeFilaments) write(`system/Acme/filament/${p.name}.json`, p);
@@ -215,6 +229,65 @@ write('user/default/filament/Legacy PETG.json', {
   inherits: 'Globex PETG @System',
   compatible_printers: ['Retired Printer A', 'Retired Printer B'],
   nozzle_temperature: '245',
+});
+
+// ─── compatibility shapes ──────────────────────────────────────────────────
+// One filament per reason `compatibilityFor` can return, so a test can assert the
+// reason rather than the boolean.
+
+// Named explicitly — but only for the *vendor* printer. `Workshop Cube` inherits
+// that preset, so the slicer offers this filament for it anyway
+// (`is_compatible_with_parent_printer`, Preset.cpp:798-806). This is the shape
+// that catches a model built on name-matching alone.
+write('user/default/filament/Studio PLA Inherited.json', {
+  name: 'Studio PLA Inherited',
+  from: 'User',
+  inherits: 'Acme PLA @System',
+  compatible_printers: ['Acme Cube 0.4 nozzle'],
+  nozzle_temperature: '210',
+});
+
+// Excluded: a non-empty list that names another installed printer and not this
+// one. Not an orphan — the printer it names is real.
+write('user/default/filament/Studio PLA MK2 Only.json', {
+  name: 'Studio PLA MK2 Only',
+  from: 'User',
+  inherits: 'Acme PLA @System',
+  compatible_printers: ['Workshop Cube MK2'],
+  nozzle_temperature: '212',
+});
+
+// A condition with an *empty* list, which is the case the slicer treats as "the
+// condition is the whole answer" (Preset.cpp:826). Not evaluated yet, so it has to
+// come back undetermined with the expression shown rather than as a guess.
+write('user/default/filament/Studio PLA Conditional.json', {
+  name: 'Studio PLA Conditional',
+  from: 'User',
+  inherits: 'Acme PLA @System',
+  compatible_printers: [],
+  compatible_printers_condition: 'printer_notes=~/.*ACME_CUBE.*/ and nozzle_diameter[0]==0.4',
+  nozzle_temperature: '214',
+});
+
+// A condition we could never evaluate — a function outside any documented subset.
+// It must land on undetermined too, not on a default answer.
+write('user/default/filament/Studio PLA Opaque.json', {
+  name: 'Studio PLA Opaque',
+  from: 'User',
+  inherits: 'Acme PLA @System',
+  compatible_printers: [],
+  compatible_printers_condition: 'interpolate_table(nozzle_diameter[0], (0.4, 1), (0.6, 0)) > 0.5',
+  nozzle_temperature: '216',
+});
+
+// The process gate, which is a second relation and not the same one: this filament
+// is fine for the printer and only offered with one process.
+write('user/default/filament/Studio PLA Fine Process.json', {
+  name: 'Studio PLA Fine Process',
+  from: 'User',
+  inherits: 'Acme PLA @System',
+  compatible_prints: '"0.20mm Standard @Acme"',
+  nozzle_temperature: '218',
 });
 
 // ─── an inactive profile + its sync snapshots ──────────────────────────────

@@ -11,6 +11,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { analyze, stats } from './analyze';
+import { compatibilityFor, compatibilitySummary } from './compatibility';
 import { diffEffective, diffRaw } from './diff';
 import { buildIndex, loadOrder, lookupParent, type ConfigIndex } from './index-config';
 import { loadConfigDir } from './load-fixtures';
@@ -306,6 +307,203 @@ describe('dead files', () => {
   it('disambiguates titles when a name is claimed more than once', () => {
     const titles = findings.filter((f) => f.kind === 'detached').map((f) => f.title);
     expect(new Set(titles).size).toBe(titles.length);
+  });
+});
+
+describe('printer compatibility', () => {
+  const machine = byFile('user/default/machine/Workshop Cube.json');
+  const c = compatibilityFor(index, machine);
+  const verdict = (name: string) => {
+    const v = [...c.filaments, ...c.processes].find((x) => x.preset.name === name);
+    if (!v) throw new Error(`not judged: ${name}`);
+    return v;
+  };
+
+  it('offers a filament that names no printers to every printer', () => {
+    // Empty means "every printer" (Preset.cpp:826). Reading it as "no printer"
+    // inverts the answer for most of a real config.
+    expect(verdict('Acme PLA @System')).toMatchObject({
+      included: true,
+      reason: 'compatible-with-everything',
+    });
+  });
+
+  it('offers a filament that names this printer', () => {
+    expect(verdict('Studio ABS')).toMatchObject({
+      included: true,
+      reason: 'named-explicitly',
+      evidence: { key: 'compatible_printers', value: 'Workshop Cube' },
+    });
+  });
+
+  it('offers a filament that names the preset this printer inherits from', () => {
+    // The clause that looks wrong and is not: a filament naming the *vendor*
+    // printer is offered on every user printer derived from it
+    // (`is_compatible_with_parent_printer`, Preset.cpp:798-806). A model built on
+    // name-matching alone reports this as excluded, which is a false negative on
+    // the most common real setup there is.
+    expect(verdict('Studio PLA Inherited')).toMatchObject({
+      included: true,
+      reason: 'named-via-parent',
+      evidence: { key: 'compatible_printers', value: 'Acme Cube 0.4 nozzle' },
+    });
+  });
+
+  it('does not extend the parent clause to a system printer', () => {
+    // The source checks `! active_printer.preset.is_system` before consulting the
+    // parent (Preset.cpp:841). So a filament naming `fdm_machine_common` reaches a
+    // *user* printer that inherits it and not the vendor preset that also does.
+    const built = buildIndex([
+      {
+        path: 'system/Acme/machine/base.json',
+        text: JSON.stringify({ name: 'Acme Base' }),
+      },
+      {
+        path: 'system/Acme/machine/vendor.json',
+        text: JSON.stringify({ name: 'Acme Cube', inherits: 'Acme Base' }),
+      },
+      {
+        path: 'user/default/machine/mine.json',
+        text: JSON.stringify({ name: 'Shop One', inherits: 'Acme Base' }),
+      },
+      {
+        path: 'user/default/filament/f.json',
+        text: JSON.stringify({ name: 'F', compatible_printers: ['Acme Base'] }),
+      },
+    ]);
+    const pick = (printer: string) =>
+      compatibilityFor(built, built.presets.find((p) => p.name === printer)!).filaments.find(
+        (x) => x.preset.name === 'F',
+      );
+    expect(pick('Shop One')).toMatchObject({ included: true, reason: 'named-via-parent' });
+    expect(pick('Acme Cube')).toMatchObject({ included: false, reason: 'excluded' });
+  });
+
+  it('excludes a filament whose list names another installed printer', () => {
+    expect(verdict('Studio PLA MK2 Only')).toMatchObject({
+      included: false,
+      reason: 'excluded',
+      evidence: { key: 'compatible_printers', value: 'Workshop Cube MK2' },
+    });
+  });
+
+  it('reads the serialised list form as well as the array', () => {
+    // The failing direction: an unparsed `'"A";"B"'` reads as an empty list, which
+    // means "compatible with everything" — the opposite of what it says.
+    const gate = verdict('Studio PLA Fine Process').processGate;
+    expect(gate?.names).toEqual(['0.20mm Standard @Acme']);
+  });
+
+  it('says undetermined for a condition instead of guessing', () => {
+    for (const name of ['Studio PLA Conditional', 'Studio PLA Opaque']) {
+      const v = verdict(name);
+      expect(v.included).toBe('undetermined');
+      expect(v.reason).toBe('condition');
+      // The expression verbatim: "it depends on this, which we do not evaluate"
+      // is a real answer; a boolean here would not be.
+      expect(v.evidence.key).toBe('compatible_printers_condition');
+      expect(v.evidence.value.length).toBeGreaterThan(10);
+    }
+  });
+
+  it('never treats a condition as a name list', () => {
+    const v = verdict('Studio PLA Conditional');
+    expect(v.reason).not.toBe('excluded');
+    expect(v.reason).not.toBe('compatible-with-everything');
+  });
+
+  it('scopes a filament to a process only when asked, and ands the two gates', () => {
+    const fine = byFile('system/Acme/process/0.20mm Standard @Acme.json');
+    const draft = byFile('system/Acme/process/0.28mm Draft @Acme.json');
+    const withFine = compatibilityFor(index, machine, { process: fine });
+    const withDraft = compatibilityFor(index, machine, { process: draft });
+    const name = 'Studio PLA Fine Process';
+    const pick = (r: ReturnType<typeof compatibilityFor>) =>
+      r.filaments.find((x) => x.preset.name === name)!;
+
+    // Unscoped, the printer axis is the answer and the gate is a note.
+    expect(verdict(name).included).toBe(true);
+    expect(verdict(name).processGate?.passes).toBeUndefined();
+    expect(pick(withFine)).toMatchObject({ included: true });
+    expect(pick(withFine).processGate?.passes).toBe(true);
+    // `is_compatible &= is_compatible_with_print` (Preset.cpp:3364).
+    expect(pick(withDraft).included).toBe(false);
+    expect(pick(withDraft).processGate?.passes).toBe(false);
+  });
+
+  it('never gates a process by compatible_prints', () => {
+    // `is_compatible_with_print` is only applied to filaments — processes are
+    // updated with no active print at all (PresetBundle.cpp:5421 vs :5439), so a
+    // `compatible_prints` on a process is not a restriction the slicer applies.
+    expect(c.processes.every((x) => x.processGate === undefined)).toBe(true);
+  });
+
+  it('marks the printer defaults without making them a verdict', () => {
+    // Being the default decides what gets *selected* (PresetBundle.cpp:2142-2166),
+    // not what is compatible — so it must not change `included` or `reason`.
+    const vendorPrinter = byFile('system/Acme/machine/Acme Cube 0.4 nozzle.json');
+    const r = compatibilityFor(index, vendorPrinter);
+    const dflt = r.filaments.find((x) => x.preset.name === 'Acme PLA @System');
+    expect(dflt?.isPrinterDefault).toBe(true);
+    expect(dflt?.reason).toBe('compatible-with-everything');
+    expect(r.processes.find((x) => x.preset.name === '0.20mm Standard @Acme')?.isPrinterDefault).toBe(
+      true,
+    );
+    expect(r.filaments.filter((x) => x.isPrinterDefault)).toHaveLength(1);
+  });
+
+  it('leaves out the presets the slicer never loads, unless asked', () => {
+    expect(c.processes.some((x) => x.preset.name === 'Cloud Only')).toBe(false);
+    const wide = compatibilityFor(index, machine, { includeNeverLoaded: true });
+    const dead = wide.processes.filter((x) => x.reason === 'never-loaded');
+    expect(dead.length).toBeGreaterThan(0);
+    expect(dead.every((x) => x.included === false)).toBe(true);
+    // A snapshot is never judged at all: the slicer does not load one.
+    expect(wide.processes.every((x) => x.preset.scope !== 'snapshot')).toBe(true);
+  });
+
+  it('excludes a library filament a vendor supersedes for this printer', () => {
+    // `m_excluded_from` is derived, not stored: a library filament with an empty
+    // `compatible_printers` inherits the exclusions of every other vendor's preset
+    // sharing its `alias` (Preset.cpp:3704-3733). Built inline because the fixture
+    // has no filament library — synthesising one there would double its size for
+    // one rule.
+    const built = buildIndex([
+      {
+        path: 'user/default/machine/m.json',
+        text: JSON.stringify({ name: 'Shop One', inherits: 'Vendor Base 0.4' }),
+      },
+      {
+        path: 'system/OrcaFilamentLibrary/filament/Generic PLA @System.json',
+        text: JSON.stringify({ name: 'Generic PLA @System', alias: 'Generic PLA' }),
+      },
+      {
+        path: 'system/Acme/filament/Generic PLA @Acme.json',
+        text: JSON.stringify({
+          name: 'Generic PLA @Acme',
+          alias: 'Generic PLA',
+          compatible_printers: ['Vendor Base 0.4'],
+        }),
+      },
+    ]);
+    const printer = built.presets.find((p) => p.name === 'Shop One')!;
+    const r = compatibilityFor(built, printer);
+    expect(r.filaments.find((x) => x.preset.name === 'Generic PLA @System')).toMatchObject({
+      included: false,
+      reason: 'excluded-by-library',
+      evidence: { key: 'alias', value: 'Generic PLA' },
+    });
+    // The vendor's own version is the one offered, via the parent clause.
+    expect(r.filaments.find((x) => x.preset.name === 'Generic PLA @Acme')).toMatchObject({
+      included: true,
+      reason: 'named-via-parent',
+    });
+  });
+
+  it('summarises without re-deriving anything', () => {
+    const s = compatibilitySummary(c.filaments);
+    expect(s.yes + s.no + s.undetermined).toBe(c.filaments.length);
+    expect(s.undetermined).toBe(2);
   });
 });
 
