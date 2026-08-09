@@ -24,7 +24,7 @@
  */
 
 import { diffEffective } from './diff';
-import { loadOrder, type ConfigIndex } from './index-config';
+import { loadOrder, tieIsArbitrary, type ConfigIndex } from './index-config';
 import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
 import type { Preset } from './types';
 
@@ -208,14 +208,19 @@ export function analyze(index: ConfigIndex): Finding[] {
     // slicer breaks arbitrarily — every file after the first is never loaded.
     const ordered = loadOrder(group);
     const [winner, ...losers] = ordered;
+    const arbitrary = tieIsArbitrary(group);
     findings.push({
       id: `shadowed:${winner.id}`,
       severity: 'high',
       kind: 'duplicate-name',
       title: `${losers.length} file${losers.length === 1 ? ' is' : 's are'} never loaded: "${winner.name}" is claimed ${group.length} times`,
-      detail: `OrcaSlicer loads ${winner.path} and skips ${losers
-        .map((l) => l.path)
-        .join(', ')} with "Preset already present, not loading". Editing a skipped file has no effect at all — the settings you see in the slicer come from ${winner.path}.`,
+      detail: arbitrary
+        ? `${group.length} files declare this name and OrcaSlicer loads exactly one, skipping the rest with "Preset already present, not loading" — so one of ${group
+            .map((p) => p.path)
+            .join(', ')} has no effect at all. Which one wins is decided by directory order, not by anything in the config, so it is not safe to predict. Rename or delete all but one.`
+        : `OrcaSlicer loads ${winner.path} and skips ${losers
+            .map((l) => l.path)
+            .join(', ')} with "Preset already present, not loading". Editing a skipped file has no effect at all — the settings you see in the slicer come from ${winner.path}.`,
       presetIds: ordered.map((p) => p.id),
       weight: 950,
     });

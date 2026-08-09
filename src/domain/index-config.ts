@@ -260,10 +260,23 @@ export function lookupParent(index: ConfigIndex, name: string, from: Preset): Pr
  *
  * Returned in load order, so the first is the winner and the rest are dead
  * files. Same rules as `lookupParent`.
+ *
+ * The ranking (system, then `base/`, then the rest) is what the slicer
+ * guarantees. Within one rank it iterates a directory, and `directory_iterator`
+ * order is filesystem-dependent — so the path sort here is a deterministic
+ * stand-in, not a prediction. `tieIsArbitrary` says when that distinction
+ * matters, so a finding can avoid claiming a winner it cannot know.
  */
 export function loadOrder(presets: Preset[]): Preset[] {
-  return [...presets].sort((a, b) => {
-    const rank = (p: Preset) => (p.origin === 'system' ? 0 : p.isCustomRoot ? 1 : 2);
-    return rank(a) - rank(b) || a.path.localeCompare(b.path, 'en');
-  });
+  return [...presets].sort((a, b) => loadRank(a) - loadRank(b) || a.path.localeCompare(b.path, 'en'));
+}
+
+function loadRank(p: Preset): number {
+  return p.origin === 'system' ? 0 : p.isCustomRoot ? 1 : 2;
+}
+
+/** True when the top two candidates share a rank, so which one wins is luck. */
+export function tieIsArbitrary(presets: Preset[]): boolean {
+  const ordered = loadOrder(presets);
+  return ordered.length > 1 && loadRank(ordered[0]) === loadRank(ordered[1]);
 }

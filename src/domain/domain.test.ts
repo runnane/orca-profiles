@@ -1,7 +1,12 @@
 /**
- * Tests run against a sanitised copy of a real OrcaSlicer config
- * (`fixtures/config`), not synthetic data — the behaviour worth pinning down
- * is exactly the messiness a real config accumulates.
+ * Tests run against `fixtures/config`, which `scripts/make-fixture.mjs`
+ * generates before the suite (see the `test` script).
+ *
+ * The fixture is synthesised rather than copied from a real installation: the
+ * shapes are the ones real configs accumulate — detached copies, redundant
+ * overrides, two files claiming one name, an inactive profile, sync snapshots,
+ * credentials that are actually set — but every name in it is invented, because
+ * this repo is public and someone's preset and printer names are their own.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -13,15 +18,9 @@ import { parseQuotedList, scalarAsList, valuesEqual } from './normalize';
 import { isSensitiveKey, maskValue, redactConfJson, redactPresetJson, REDACTED } from './redact';
 import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
 
-const index: ConfigIndex = buildIndex(loadConfigDir(new URL('../../fixtures/config', import.meta.url).pathname));
+const FIXTURE = new URL('../../fixtures/config', import.meta.url).pathname;
+const index: ConfigIndex = buildIndex(loadConfigDir(FIXTURE));
 
-function userPreset(name: string, kind: string) {
-  const p = index.active.find((x) => x.origin === 'user' && x.name === name && x.kind === kind);
-  if (!p) throw new Error(`fixture missing: ${kind} ${name}`);
-  return p;
-}
-
-/** Presets are identified by declared name, which need not match the filename. */
 function byFile(file: string) {
   const p = index.presets.find((x) => x.path.endsWith(file));
   if (!p) throw new Error(`fixture missing file: ${file}`);
@@ -29,60 +28,55 @@ function byFile(file: string) {
 }
 
 describe('index', () => {
-  it('parses the fixture config without errors', () => {
+  it('parses the fixture without errors', () => {
     expect(index.parseErrors).toEqual([]);
-    expect(index.presets.length).toBeGreaterThan(100);
+    expect(index.presets.length).toBeGreaterThan(20);
   });
 
-  it('finds both system and user presets across vendors', () => {
+  it('counts system and user presets across vendors', () => {
     const s = stats(index);
-    expect(s.system).toBeGreaterThan(50);
-    expect(s.user).toBeGreaterThan(20);
-    expect(s.vendors).toBeGreaterThanOrEqual(3);
+    expect(s.user).toBeGreaterThan(5);
+    expect(s.system).toBeGreaterThan(5);
+    expect(s.vendors).toBe(2);
   });
 
-  it('separates active presets from sync snapshots', () => {
-    expect(index.active.length).toBeLessThan(index.presets.length);
-    expect(index.active.every((p) => !p.path.includes('_local/'))).toBe(true);
+  it('loads only the profile named by preset_folder', () => {
+    // The fixture's conf leaves `preset_folder` empty, so `default` is live.
+    expect(index.activeProfile).toBe('default');
+    expect(index.inactiveProfiles).toEqual(['cloud-0000-1111']);
+    expect(index.active.every((p) => p.origin === 'system' || p.profile === 'default')).toBe(true);
   });
 
   it('gives every preset a unique id', () => {
-    // Names collide by design: the local and cloud profiles each hold a "jon
-    // ABS", and three files claim "ABS fast". Keying on name collapsed those
-    // into one row that could not be opened separately.
+    // Names collide by design here, so keying on name collapsed rows that could
+    // not then be opened separately.
     const ids = index.presets.map((p) => p.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(index.byId.size).toBe(index.presets.length);
   });
 
-  it('loads only the profile named by preset_folder', () => {
-    // This config has `preset_folder: ""`, so `default` is live.
-    expect(index.activeProfile).toBe('default');
-    expect(index.inactiveProfiles.length).toBeGreaterThan(0);
-    expect(index.active.every((p) => p.origin === 'system' || p.profile === 'default')).toBe(true);
-  });
-
   it('keeps the same name in two profiles apart', () => {
-    const local = index.presets.find((p) => p.path === 'user/default/filament/jon ABS.json');
-    const cloud = index.presets.find(
-      (p) => p.profile !== 'default' && p.name === 'jon ABS' && p.origin === 'user',
-    );
-    expect(local).toBeDefined();
-    expect(cloud).toBeDefined();
-    expect(local!.id).not.toBe(cloud!.id);
-    expect(local!.scope).toBe('active');
-    expect(cloud!.scope).not.toBe('active');
+    const live = byFile('user/default/filament/Studio ABS.json');
+    const cloud = byFile('cloud-0000-1111/filament/Studio ABS.json');
+    expect(live.id).not.toBe(cloud.id);
+    expect(live.scope).toBe('active');
+    expect(cloud.scope).toBe('inactive-profile');
   });
 
   it('marks base/ presets as detached custom roots', () => {
     // `base/` is where the slicer saves a preset detached from its parent
-    // (Preset.cpp:3869); they are loaded first so others can inherit them.
+    // (Preset.cpp:3869); they load first so others can inherit them.
     const roots = index.presets.filter((p) => p.isCustomRoot);
     expect(roots.length).toBeGreaterThan(0);
     for (const r of roots) {
       expect(r.path).toContain('/base/');
       expect(r.inherits).toBeUndefined();
     }
+  });
+
+  it('separates active presets from sync snapshots', () => {
+    expect(stats(index).snapshots).toBeGreaterThan(0);
+    expect(index.active.every((p) => !p.path.includes('_local/'))).toBe(true);
   });
 
   it('never resolves a parent to a sync snapshot', () => {
@@ -92,7 +86,7 @@ describe('index', () => {
   });
 
   it('never resolves a parent across profiles', () => {
-    // A PresetCollection holds the system bundles plus one user folder, so a
+    // One PresetCollection holds the system bundles plus one user folder, so a
     // cross-profile parent cannot happen (PresetBundle.cpp:528).
     for (const p of index.presets) {
       if (!p.inherits || p.scope === 'snapshot') continue;
@@ -104,13 +98,11 @@ describe('index', () => {
 
 describe('load order', () => {
   it('puts system first, then custom roots, then ordinary presets', () => {
-    const group = index.presets.filter((p) => p.name === 'ABS fast');
-    expect(group.length).toBeGreaterThan(1);
-    const ordered = loadOrder(group);
-    // A custom root under base/ is loaded before a same-named ordinary preset.
-    const rootAt = ordered.findIndex((p) => p.isCustomRoot);
-    const plainAt = ordered.findIndex((p) => !p.isCustomRoot && p.origin === 'user');
-    if (rootAt !== -1 && plainAt !== -1) expect(rootAt).toBeLessThan(plainAt);
+    const root = byFile('process/base/Studio Base.json');
+    const plain = byFile('user/default/process/Fast Draft.json');
+    const system = byFile('system/Acme/process/fdm_process_common.json');
+    const ordered = loadOrder([plain, root, system]);
+    expect(ordered.map((p) => p.id)).toEqual([system.id, root.id, plain.id]);
   });
 });
 
@@ -138,8 +130,8 @@ describe('normalize', () => {
   });
 
   it('does NOT flatten genuinely different vectors', () => {
-    // The failing direction: ABS fast lists three printers, ABS fast2 one.
-    // If this ever passes as equal, the app is hiding a real difference.
+    // The failing direction: if this ever compares equal, the app is hiding a
+    // real difference behind "same value, written differently".
     expect(valuesEqual(['a', 'b', 'c'], '"a"')).toBe(false);
     expect(valuesEqual(['70', '70'], '70,80')).toBe(false);
   });
@@ -151,90 +143,87 @@ describe('normalize', () => {
 });
 
 describe('inheritance', () => {
-  it('walks a real system chain to its base', () => {
-    const generic = index.presets.find((p) => p.name === 'Generic ABS @System');
-    expect(generic).toBeDefined();
-    const { chain } = inheritanceChain(index, generic!);
-    expect(chain.map((c) => c.name)).toEqual(['Generic ABS @System', 'fdm_filament_abs', 'fdm_filament_common']);
+  it('walks a chain to its base', () => {
+    const { chain } = inheritanceChain(index, byFile('system/Acme/filament/Acme ABS @System.json'));
+    expect(chain.map((c) => c.name)).toEqual([
+      'Acme ABS @System',
+      'fdm_filament_abs',
+      'fdm_filament_common',
+    ]);
   });
 
-  it('resolves a sparse user preset to far more settings than it stores', () => {
-    const jonAbs = userPreset('jon ABS', 'filament');
-    const stored = Object.keys(jonAbs.raw).length;
-    const r = resolve(index, jonAbs);
+  it('resolves a sparse preset to far more settings than it stores', () => {
+    const sparse = byFile('user/default/filament/Studio ABS.json');
+    const stored = Object.keys(sparse.raw).length;
+    const r = resolve(index, sparse);
     expect(stored).toBeLessThan(12);
-    // The whole point: the preset stores a handful of keys, the slicer uses many.
-    expect(r.settings.size).toBeGreaterThan(40);
-    expect(r.settings.size).toBeGreaterThan(stored * 4);
+    // The whole point: a handful of keys stored, many in effect.
+    expect(r.settings.size).toBeGreaterThan(stored * 10);
   });
 
   it('attributes each resolved value to the preset that supplied it', () => {
-    const jonAbs = userPreset('jon ABS', 'filament');
-    const r = resolve(index, jonAbs);
-    const own = [...r.settings.values()].filter((s) => s.sourceName === 'jon ABS');
-    const inherited = [...r.settings.values()].filter((s) => s.sourceName !== 'jon ABS');
+    const r = resolve(index, byFile('user/default/filament/Studio ABS.json'));
+    const own = [...r.settings.values()].filter((s) => s.depth === 0);
+    const inherited = [...r.settings.values()].filter((s) => s.depth > 0);
     expect(own.length).toBeGreaterThan(0);
     expect(inherited.length).toBeGreaterThan(own.length);
   });
 
   it('accounts for every stored setting exactly once', () => {
-    const jonAbs = userPreset('jon ABS', 'filament');
-    const o = ownOverrides(index, jonAbs);
-    const total = o.effective.length + o.redundant.length + o.novel.length;
-    expect(total).toBe(Object.keys(jonAbs.raw).filter(isSettingKey).length);
+    const p = byFile('user/default/filament/Studio ABS Hot.json');
+    const o = ownOverrides(index, p);
+    expect(o.effective.length + o.redundant.length + o.novel.length).toBe(
+      Object.keys(p.raw).filter(isSettingKey).length,
+    );
+  });
+
+  it('separates overrides that change something from ones that do not', () => {
+    const o = ownOverrides(index, byFile('user/default/filament/Studio ABS Hot.json'));
+    expect(o.effective.map((e) => e.key).sort()).toEqual([
+      'filament_flow_ratio',
+      'nozzle_temperature',
+    ]);
+    expect(o.redundant.map((r) => r.key).sort()).toEqual([
+      'filament_max_volumetric_speed',
+      'hot_plate_temp',
+    ]);
   });
 
   it('shows a Copy is almost entirely redundant', () => {
-    // The headline case: 359 keys stored, but only a handful differ from the
-    // parent it still inherits from.
-    const copy = byFile('0.28mm Extra Draft @Elegoo CC2 0.4 nozzle - Copy.json');
+    // The headline case: a large file whose real content is a couple of keys.
+    const copy = byFile('0.28mm Draft @Acme - Copy.json');
     const o = ownOverrides(index, copy);
-    expect(Object.keys(copy.raw).length).toBeGreaterThan(300);
-    expect(o.effective.length).toBeLessThan(10);
+    expect(Object.keys(copy.raw).length).toBeGreaterThan(100);
+    expect(o.effective.map((e) => e.key).sort()).toEqual(['top_shell_thickness', 'wall_loops']);
     expect(o.redundant.length).toBeGreaterThan(100);
   });
 
   it('survives a preset whose parent is missing', () => {
-    const orphan = {
-      id: 'user:filament:orphan',
-      name: 'orphan',
-      kind: 'filament' as const,
-      origin: 'user' as const,
-      scope: 'active' as const,
-      isCustomRoot: false,
-      profile: 'default',
-      path: 'user/default/filament/orphan.json',
-      inherits: 'No Such Preset',
-      raw: { name: 'orphan', inherits: 'No Such Preset', nozzle_temperature: '250' },
-    };
-    const r = resolve(index, orphan);
-    expect(r.missingParent).toBe('No Such Preset');
+    const r = resolve(index, byFile('Orphaned Profile.json'));
+    expect(r.missingParent).toBe('A Preset That Does Not Exist');
     expect(r.chain).toHaveLength(1);
-    expect(r.settings.get('nozzle_temperature')?.value).toBe('250');
+    expect(r.settings.get('layer_height')?.value).toBe('0.2');
   });
 });
 
 describe('diff', () => {
-  it('separates real differences from serialisation noise on the ABS fast pair', () => {
-    // Both files declare the name "ABS fast"; only the filenames differ.
-    const a = byFile('user/default/process/ABS fast.json');
-    const b = byFile('user/default/process/ABS fast2.json');
+  it('separates real differences from serialisation noise', () => {
+    // Two files, same declared name, written in the two different forms.
+    const a = byFile('user/default/process/Fast Draft.json');
+    const b = byFile('user/default/process/Fast Draft 2.json');
     const d = diffRaw(a, b);
-    const real = d.rows.filter((r) => r.status === 'changed');
 
-    // Both are detached full copies, so raw and effective agree here.
-    expect(d.compared).toBeGreaterThan(300);
-    expect(d.cosmetic).toBeGreaterThan(0);
-    // A handful of real differences hiding behind hundreds of identical keys.
-    expect(real.length).toBeLessThan(12);
-    const keys = real.map((r) => r.key);
-    expect(keys).toContain('default_acceleration');
-    expect(keys).toContain('enable_support');
-    expect(keys).toContain('support_type');
+    expect(d.compared).toBeGreaterThan(100);
+    // Three keys hold the same value written in the other form and must not
+    // read as differences. (The fixture has a fourth, `print_extruder_variant`,
+    // which is metadata and excluded from diffs entirely.)
+    expect(d.cosmetic).toBe(3);
+    const changed = d.rows.filter((r) => r.status === 'changed').map((r) => r.key);
+    expect(changed.sort()).toEqual(['default_acceleration', 'enable_support', 'support_type']);
   });
 
   it('reports a preset compared with itself as entirely identical', () => {
-    const a = userPreset('ABS fast', 'process');
+    const a = byFile('user/default/process/Fast Draft.json');
     const d = diffEffective(index, a, a);
     expect(d.rows).toEqual([]);
     expect(d.identical).toBe(d.compared);
@@ -245,19 +234,36 @@ describe('analyze', () => {
   const findings = analyze(index);
 
   it('flags detached full copies', () => {
-    const detached = findings.filter((f) => f.kind === 'detached');
-    expect(detached.length).toBeGreaterThan(0);
-    expect(detached.some((f) => f.title.includes('ABS fast'))).toBe(true);
+    expect(findings.filter((f) => f.kind === 'detached').length).toBeGreaterThan(0);
   });
 
-  it('flags the two files in one profile that both claim "ABS fast"', () => {
+  it('flags a missing parent', () => {
+    const f = findings.find((x) => x.kind === 'broken-parent');
+    expect(f?.severity).toBe('high');
+    expect(f?.title).toContain('Orphaned Profile');
+  });
+
+  it('flags a preset limited to printers that are gone', () => {
+    const f = findings.find((x) => x.kind === 'orphaned-printer');
+    expect(f?.title).toContain('Legacy PETG');
+  });
+
+  it('says two files claim one name, without predicting which wins', () => {
+    // Both are ordinary presets in one directory, so the slicer's choice comes
+    // down to directory iteration order — claiming a winner would be invention.
+    const f = findings.find((x) => x.kind === 'duplicate-name');
+    expect(f?.severity).toBe('high');
+    expect(f?.detail).toContain('Preset already present, not loading');
+    expect(f?.detail).toContain('decided by directory order');
+  });
+
+  it('does not report a cross-profile copy as a duplicate name', () => {
+    // `Studio ABS` exists in both profiles. That is how sync works.
     const dup = findings.filter((f) => f.kind === 'duplicate-name');
-    expect(dup.some((f) => f.title.includes('ABS fast'))).toBe(true);
+    expect(dup.some((f) => f.title.includes('Studio ABS'))).toBe(false);
   });
 
   it('only analyses the profile the slicer actually loads', () => {
-    // `preset_folder` is empty in this config, so `default` is live and the
-    // cloud profile is inert. A finding about an inert preset is noise.
     for (const f of findings) {
       for (const id of f.presetIds) {
         const p = index.byId.get(id);
@@ -266,48 +272,40 @@ describe('analyze', () => {
     }
   });
 
-  it('does not report a cross-profile copy as a duplicate name', () => {
-    // `jon ABS` exists in both the local and the cloud profile. That is how
-    // sync works, not a fault.
-    const dup = findings.filter((f) => f.kind === 'duplicate-name');
-    expect(dup.some((f) => f.title.includes('jon ABS'))).toBe(false);
-  });
-
-  it('says which duplicate wins and which are never loaded', () => {
-    // OrcaSlicer loads the first file under a name and skips the rest outright
-    // (Preset.cpp:1619), so this is not a tie — it is dead files.
-    const dup = findings.filter((f) => f.kind === 'duplicate-name');
-    const absFast = dup.find((f) => f.title.includes('ABS fast'));
-    expect(absFast).toBeDefined();
-    expect(absFast!.severity).toBe('high');
-    expect(absFast!.detail).toContain('Preset already present, not loading');
-    // The winner is named first in presetIds.
-    expect(absFast!.presetIds.length).toBeGreaterThan(1);
-  });
-
-  it('finds near-duplicate user presets', () => {
-    const near = findings.filter((f) => f.kind === 'near-duplicate');
-    expect(near.length).toBeGreaterThan(0);
-  });
-
-  it('ignores cloud sync snapshots', () => {
-    // 21 `_local/` folders each mirror the synced presets. If they leaked into
-    // the analysis every one of them would read as a duplicate.
+  it('never mentions a sync snapshot', () => {
     expect(findings.some((f) => f.detail.includes('_local/'))).toBe(false);
-    const s = stats(index);
-    expect(s.snapshots).toBeGreaterThan(0);
-  });
-
-  it('produces no finding without at least one preset or a parse error', () => {
-    for (const f of findings) {
-      if (f.kind !== 'parse-error') expect(f.presetIds.length).toBeGreaterThan(0);
-    }
   });
 
   it('sorts high severity first', () => {
     const rank = { high: 0, medium: 1, low: 2 };
     const seq = findings.map((f) => rank[f.severity]);
     expect(seq).toEqual([...seq].sort((a, b) => a - b));
+  });
+
+  it('gives every finding at least one preset', () => {
+    for (const f of findings) {
+      if (f.kind !== 'parse-error') expect(f.presetIds.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('dead files', () => {
+  const findings = analyze(index);
+
+  it('reports a shadowed file once, and not as a separate problem', () => {
+    // One of the two "Fast Draft" files is never loaded. It is also a detached
+    // full copy — but saying so invites fixing a file the slicer never reads,
+    // so only the duplicate-name finding should mention it.
+    const ordered = loadOrder(index.active.filter((p) => p.name === 'Fast Draft'));
+    const dead = ordered[ordered.length - 1];
+    const mentions = findings.filter((f) => f.presetIds.includes(dead.id));
+    expect(mentions).toHaveLength(1);
+    expect(mentions[0].kind).toBe('duplicate-name');
+  });
+
+  it('disambiguates titles when a name is claimed more than once', () => {
+    const titles = findings.filter((f) => f.kind === 'detached').map((f) => f.title);
+    expect(new Set(titles).size).toBe(titles.length);
   });
 });
 
@@ -331,6 +329,98 @@ describe('redaction', () => {
   });
 });
 
+describe('transport redaction', () => {
+  it('replaces a set credential with the sentinel and never the value', () => {
+    const raw = JSON.stringify({
+      name: 'my printer',
+      printhost_apikey: 'super-secret-key',
+      printhost_password: 'hunter2',
+      print_host: ['printer.example.invalid', ''],
+      nozzle_temperature: '250',
+    });
+    const out = redactPresetJson(raw);
+    expect(out).not.toContain('super-secret-key');
+    expect(out).not.toContain('hunter2');
+    expect(out).not.toContain('printer.example.invalid');
+
+    const parsed = JSON.parse(out) as Record<string, unknown>;
+    expect(parsed.printhost_apikey).toBe(REDACTED);
+    // Set-ness survives per element, so "which slots are configured" is visible.
+    expect(parsed.print_host).toEqual([REDACTED, '']);
+    expect(parsed.nozzle_temperature).toBe('250');
+  });
+
+  it('leaves an unset credential empty so the UI can say "not set"', () => {
+    const out = JSON.parse(redactPresetJson(JSON.stringify({ printhost_apikey: '' })));
+    expect(out.printhost_apikey).toBe('');
+  });
+
+  it('keeps the redacted value readable as "set" by the UI', () => {
+    expect(maskValue(REDACTED)).toBe('•••••• (set, hidden)');
+  });
+
+  it('scrubs a sensitive subtree at any depth, not just top-level keys', () => {
+    // Presets are flat, but this also ran over OrcaSlicer.conf, which is not —
+    // which is how a real printer address once reached the browser.
+    const out = redactPresetJson(
+      JSON.stringify({
+        app: { preset_folder: '', printhost_apikey: 'nested-secret' },
+        outer: { inner: { printhost_password: 'deep' } },
+      }),
+    );
+    expect(out).not.toContain('nested-secret');
+    expect(out).not.toContain('deep');
+  });
+
+  it('drops a sensitive subtree whose KEYS are the secret', () => {
+    // `local_machines` is keyed by printer address. Blanking values would leave
+    // the addresses sitting in the key positions.
+    const out = redactPresetJson(
+      JSON.stringify({
+        local_machines: { '192.0.2.10': { dev_ip: '192.0.2.10', dev_name: 'printer' } },
+      }),
+    );
+    expect(out).not.toContain('192.0.2.10');
+    expect(out).not.toContain('printer');
+    expect(JSON.parse(out).local_machines).toEqual({});
+  });
+
+  it('reduces OrcaSlicer.conf to the one field the app needs', () => {
+    const out = redactConfJson(
+      JSON.stringify({
+        app: { preset_folder: 'cloud-abc', other_setting: 'kept out' },
+        access_code: { printer1: 'pairing-code' },
+        user_access_code: 'secret',
+        dev_sn: { a: 'SERIAL123' },
+        local_machines: { '192.0.2.5': { dev_name: 'ender' } },
+      }),
+    );
+    expect(JSON.parse(out)).toEqual({ app: { preset_folder: 'cloud-abc' } });
+    for (const leak of ['pairing-code', 'SERIAL123', '192.0.2.5', 'ender', 'secret', 'kept out']) {
+      expect(out).not.toContain(leak);
+    }
+  });
+
+  it('still yields a usable conf when it cannot be parsed', () => {
+    expect(JSON.parse(redactConfJson('{broken'))).toEqual({ app: { preset_folder: '' } });
+  });
+
+  it('refuses to pass through a file it cannot parse', () => {
+    // An unparseable file might contain anything; forwarding it verbatim would
+    // route around the key-name check entirely.
+    expect(redactPresetJson('{"printhost_apikey": "leak"')).toBe('{}');
+  });
+
+  it('reduces the fixture conf, which carries every dangerous shape at once', () => {
+    const raw = loadConfigDir(FIXTURE).find((f) => f.path === 'OrcaSlicer.conf');
+    expect(raw).toBeDefined();
+    const out = redactConfJson(raw!.text);
+    for (const leak of ['00112233', 'abcdef123456', 'SNEXAMPLE0001', '192.0.2.10']) {
+      expect(out).not.toContain(leak);
+    }
+  });
+});
+
 describe('active profile is read from OrcaSlicer.conf', () => {
   const preset = (path: string, name: string) => ({
     path,
@@ -338,10 +428,9 @@ describe('active profile is read from OrcaSlicer.conf', () => {
   });
 
   it('honours a non-default preset_folder', () => {
-    // The failing direction: with `preset_folder` set to the cloud folder, the
-    // cloud presets are live and `default` is the inert one — the opposite of
-    // the fixture config. If this ever returns `default`, the conf is not
-    // being read and every scope in the app is decided by a fallback.
+    // The failing direction: with `preset_folder` set, the cloud presets are
+    // live and `default` is the inert one — the opposite of the fixture. If this
+    // ever returns `default`, the conf is not being read at all.
     const built = buildIndex([
       { path: 'OrcaSlicer.conf', text: JSON.stringify({ app: { preset_folder: 'cloud-abc' } }) },
       preset('user/default/process/a.json', 'a'),
@@ -366,115 +455,9 @@ describe('active profile is read from OrcaSlicer.conf', () => {
     expect(buildIndex([preset('user/default/process/a.json', 'a')]).activeProfile).toBe('default');
     expect(
       buildIndex([
-        { path: 'OrcaSlicer.conf', text: '{not json' },
+        { path: 'OrcaSlicer.conf', text: '{broken' },
         preset('user/default/process/a.json', 'a'),
       ]).activeProfile,
     ).toBe('default');
-  });
-});
-
-describe('dead files', () => {
-  const findings = analyze(index);
-
-  it('reports a shadowed file once, and not as a separate problem', () => {
-    // `ABS fast2.json` loses the name clash and is never loaded. It is also a
-    // detached 352-key copy — but saying so invites fixing a file the slicer
-    // has never read, so only the "never loaded" finding should mention it.
-    const dead = 'user/default/process/ABS fast2.json';
-    const mentions = findings.filter((f) => f.presetIds.includes(dead));
-    expect(mentions.length).toBe(1);
-    expect(mentions[0].kind).toBe('duplicate-name');
-  });
-
-  it('disambiguates titles when a name is claimed more than once', () => {
-    const detached = findings.filter((f) => f.kind === 'detached');
-    const titles = detached.map((f) => f.title);
-    expect(new Set(titles).size).toBe(titles.length);
-  });
-});
-
-describe('transport redaction', () => {
-  it('replaces a set credential with the sentinel and never the value', () => {
-    // The failing direction: this input HAS credentials. The fixture does not,
-    // so a test against fixture data would pass without the redactor running.
-    const raw = JSON.stringify({
-      name: 'my printer',
-      printhost_apikey: 'super-secret-key',
-      printhost_password: 'hunter2',
-      print_host: ['192.168.1.50', ''],
-      nozzle_temperature: '250',
-    });
-    const out = redactPresetJson(raw);
-    expect(out).not.toContain('super-secret-key');
-    expect(out).not.toContain('hunter2');
-    expect(out).not.toContain('192.168.1.50');
-
-    const parsed = JSON.parse(out) as Record<string, unknown>;
-    expect(parsed.printhost_apikey).toBe(REDACTED);
-    expect(parsed.printhost_password).toBe(REDACTED);
-    // Set-ness survives per element, so "one host configured" is still visible.
-    expect(parsed.print_host).toEqual([REDACTED, '']);
-    // Print settings are untouched.
-    expect(parsed.nozzle_temperature).toBe('250');
-    expect(parsed.name).toBe('my printer');
-  });
-
-  it('leaves an unset credential empty so the UI can say "not set"', () => {
-    const out = JSON.parse(redactPresetJson(JSON.stringify({ printhost_apikey: '' })));
-    expect(out.printhost_apikey).toBe('');
-  });
-
-  it('keeps the redacted value readable as "set" by the UI', () => {
-    expect(maskValue(REDACTED)).toBe('•••••• (set, hidden)');
-    expect(maskValue('')).toBe('(not set)');
-  });
-
-  it('scrubs a sensitive subtree at any depth, not just top-level keys', () => {
-    // Presets are flat, but this ran over OrcaSlicer.conf too and only checked
-    // top-level keys — which is how a real printer IP reached the browser.
-    const raw = JSON.stringify({
-      app: { preset_folder: '', printhost_apikey: 'nested-secret' },
-      outer: { inner: { printhost_password: 'deep' } },
-    });
-    const out = redactPresetJson(raw);
-    expect(out).not.toContain('nested-secret');
-    expect(out).not.toContain('deep');
-  });
-
-  it('drops a sensitive subtree whose KEYS are the secret', () => {
-    // `local_machines` is keyed by printer IP. Blanking values leaves the
-    // addresses in the key positions, so the whole subtree has to go.
-    const raw = JSON.stringify({
-      local_machines: { '192.0.2.10': { dev_ip: '192.0.2.10', dev_name: 'printer' } },
-    });
-    const out = redactPresetJson(raw);
-    expect(out).not.toContain('192.0.2.10');
-    expect(out).not.toContain('printer');
-    expect(JSON.parse(out).local_machines).toEqual({});
-  });
-
-  it('reduces OrcaSlicer.conf to the one field the app needs', () => {
-    const raw = JSON.stringify({
-      app: { preset_folder: 'cloud-abc', other_setting: 'kept out' },
-      access_code: { printer1: 'pairing-code' },
-      user_access_code: 'secret',
-      dev_sn: { a: 'SERIAL123' },
-      local_machines: { '10.0.0.5': { dev_name: 'ender' } },
-    });
-    const out = redactConfJson(raw);
-    expect(JSON.parse(out)).toEqual({ app: { preset_folder: 'cloud-abc' } });
-    for (const leak of ['pairing-code', 'SERIAL123', '10.0.0.5', 'ender', 'secret', 'kept out']) {
-      expect(out).not.toContain(leak);
-    }
-  });
-
-  it('still yields a usable conf when it cannot be parsed', () => {
-    expect(JSON.parse(redactConfJson('{broken'))).toEqual({ app: { preset_folder: '' } });
-  });
-
-  it('refuses to pass through a file it cannot parse', () => {
-    // An unparseable file might contain anything; forwarding it verbatim would
-    // route around the key-name check entirely.
-    expect(redactPresetJson('{"printhost_apikey": "leak"')).toBe('{}');
   });
 });

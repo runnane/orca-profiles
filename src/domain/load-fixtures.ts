@@ -14,7 +14,10 @@ export function loadConfigDir(root: string): ConfigFile[] {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.isFile() && entry.name.endsWith('.json')) {
+      // `.conf` too: OrcaSlicer.conf is JSON and decides which profile is
+      // live, so a loader that skips it disagrees with the browser and server
+      // readers about what the config even is.
+      else if (entry.isFile() && (entry.name.endsWith('.json') || entry.name === 'OrcaSlicer.conf')) {
         out.push({
           path: relative(root, full).split(sep).join('/'),
           text: readFileSync(full, 'utf8'),

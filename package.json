@@ -6,12 +6,12 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm sample && vite",
-    "sample": "node scripts/build-sample.mjs",
+    "sample": "pnpm fixture && node scripts/build-sample.mjs",
     "build": "pnpm sample && tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --force",
     "lint": "oxlint src",
-    "test": "vitest run",
+    "test": "pnpm fixture && vitest run",
     "gates": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
     "smoke": "playwright test",
     "report": "node scripts/build-report.mjs && node dist-cli/report.mjs",
@@ -19,7 +19,8 @@
     "docker:run": "docker run --rm -p 127.0.0.1:8099:8099 -v \"${ORCA_CONFIG:-$HOME/.config/OrcaSlicer}:/config:ro\" --read-only --security-opt no-new-privileges:true orca-profiles:latest",
     "test:server": "playwright test e2e/server.spec.ts",
     "deploy": "./scripts/deploy.sh",
-    "verify:deploy": "node scripts/verify-deploy.mjs"
+    "verify:deploy": "node scripts/verify-deploy.mjs",
+    "fixture": "node scripts/make-fixture.mjs"
   },
   "dependencies": {
     "react": "^19.2.8",
