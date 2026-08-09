@@ -19,6 +19,7 @@ import {
   classifyReference,
   loadOrder,
   lookupParent,
+  shadowedIds,
   type ConfigIndex,
 } from './index-config';
 import { loadConfigDir } from './load-fixtures';
@@ -260,7 +261,9 @@ describe('analyze', () => {
   it('says two files claim one name, without predicting which wins', () => {
     // Both are ordinary presets in one directory, so the slicer's choice comes
     // down to directory iteration order — claiming a winner would be invention.
-    const f = findings.find((x) => x.kind === 'duplicate-name');
+    const f = findings.find(
+      (x) => x.kind === 'duplicate-name' && x.title.includes('Fast Draft'),
+    );
     expect(f?.severity).toBe('high');
     expect(f?.detail).toContain('Preset already present, not loading');
     expect(f?.detail).toContain('decided by directory order');
@@ -870,6 +873,110 @@ describe('printer compatibility', () => {
     const s = compatibilitySummary(c.filaments);
     expect(s.yes + s.no + s.undetermined).toBe(c.filaments.length);
     expect(s.undetermined).toBe(2);
+  });
+});
+
+describe('cross-vendor name clashes', () => {
+  const findings = analyze(index);
+  const crossVendor = findings.filter(
+    (f) => f.kind === 'duplicate-name' && f.title.includes('Shared PLA @System'),
+  );
+
+  it('reports a name two vendors both ship', () => {
+    // One collection per preset type holds every vendor's presets, so the merge
+    // discards the second arrival — a different mechanism from the intra-folder
+    // clash, and one our vendor-scoped grouping used to miss entirely.
+    expect(crossVendor).toHaveLength(1);
+    expect(crossVendor[0].severity).toBe('high');
+    expect(crossVendor[0].title).toContain('Acme');
+    expect(crossVendor[0].title).toContain('Globex');
+    expect(crossVendor[0].detail).toContain('Found duplicated preset');
+    // Not the intra-folder rule, and must not claim to be.
+    expect(crossVendor[0].detail).not.toContain('Preset already present');
+  });
+
+  it('refuses to predict which vendor survives', () => {
+    // Vendor files are enumerated with `directory_iterator` over `system/*.json`
+    // (PresetBundle.cpp:2205), so between two ordinary vendors the order is
+    // filesystem-dependent and naming a winner would be invention.
+    expect(crossVendor[0].detail).toContain('not safe to predict');
+    expect(crossVendor[0].presetIds).toHaveLength(2);
+  });
+
+  it('treats the loser as never loaded, so nothing else is reported about it', () => {
+    const dead = [...shadowedIds(index)].filter((id) => id.includes('Shared PLA @System'));
+    expect(dead).toHaveLength(1);
+    for (const f of findings) {
+      if (f.kind === 'duplicate-name') continue;
+      expect(f.presetIds).not.toContain(dead[0]);
+    }
+  });
+
+  it('does NOT report two vendors shipping the same base', () => {
+    // The case the issue behind this thought was the likely one, and the one that
+    // cannot happen: a preset marked `instantiation: "false"` never enters a
+    // collection — it goes into a per-bundle map that is local to one vendor's
+    // load (PresetBundle.cpp:4929, :5134). "The remaining vendors are independent
+    // (no cross-vendor inheritance)", says the source. Reporting it would be a
+    // false finding.
+    const built = buildIndex([
+      {
+        path: 'system/Acme/filament/base.json',
+        text: JSON.stringify({ name: 'fdm_filament_common', instantiation: 'false' }),
+      },
+      {
+        path: 'system/Globex/filament/base.json',
+        text: JSON.stringify({ name: 'fdm_filament_common', instantiation: 'false' }),
+      },
+    ]);
+    expect(analyze(built).filter((f) => f.kind === 'duplicate-name')).toEqual([]);
+    expect(shadowedIds(built).size).toBe(0);
+  });
+
+  it('lets the filament library win, because it is merged first', () => {
+    // `OrcaFilamentLibrary` is loaded into the bundle synchronously before any
+    // other vendor is merged (PresetBundle.cpp:2231-2241), so this clash is not a
+    // coin toss and must not be reported as one.
+    const built = buildIndex([
+      {
+        path: 'system/OrcaFilamentLibrary/filament/x.json',
+        text: JSON.stringify({ name: 'Generic PLA @System' }),
+      },
+      {
+        path: 'system/Acme/filament/x.json',
+        text: JSON.stringify({ name: 'Generic PLA @System' }),
+      },
+    ]);
+    const f = analyze(built).find((x) => x.kind === 'duplicate-name');
+    expect(f?.detail).toContain('merged first and always wins');
+    expect(f?.detail).toContain('system/OrcaFilamentLibrary/filament/x.json');
+    expect(f?.detail).not.toContain('not safe to predict');
+    // …and the library's copy is the one that survives.
+    const dead = [...shadowedIds(built)];
+    expect(dead).toEqual(['system/Acme/filament/x.json']);
+  });
+
+  it('keeps the Template vendor exception', () => {
+    // The guard is `instantiation == "false" && "Template" != vendor_name`
+    // (PresetBundle.cpp:4929), so a Template-vendor base *is* loaded — and can
+    // therefore clash. Easy to lose in a refactor, so it is pinned.
+    const built = buildIndex([
+      {
+        path: 'system/Template/filament/x.json',
+        text: JSON.stringify({ name: 'Shared Base', instantiation: 'false' }),
+      },
+      {
+        path: 'system/Acme/filament/x.json',
+        text: JSON.stringify({ name: 'Shared Base' }),
+      },
+    ]);
+    expect(analyze(built).filter((f) => f.kind === 'duplicate-name')).toHaveLength(1);
+  });
+
+  it('still does not report the same name in two user profiles', () => {
+    // Sync copies the live profile into the cloud one; only one is ever loaded.
+    const dup = analyze(index).filter((f) => f.kind === 'duplicate-name');
+    expect(dup.some((f) => f.title.includes('Studio ABS'))).toBe(false);
   });
 });
 

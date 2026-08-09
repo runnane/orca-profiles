@@ -93,8 +93,26 @@ Not merged, not renamed — skipped, with `"Preset already present, not loading"
 ([Preset.cpp:1619](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1619)).
 Load order is system bundles → `base/` → the rest of the folder.
 
-The sample config has two files both declaring the name `ABS fast`. One of them
-has no effect on anything, and nothing in the UI tells you which.
+The sample config has two files both declaring one name. One of them has no
+effect on anything, and nothing in the slicer tells you which.
+
+**Two vendors claiming one name is a different mechanism with the same result.**
+Each vendor loads into its own bundle — in parallel, and independently, because
+there is no cross-vendor inheritance
+([PresetBundle.cpp:2245](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L2245)) —
+and the bundles are then merged into one collection per preset type. The merge
+keeps what is already there and **discards** the incoming preset of the same name,
+logging `"Found duplicated preset"`
+([PresetBundle.cpp:2292](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L2292)).
+`OrcaFilamentLibrary` is merged first and so always wins; between two ordinary
+vendors the order comes from reading `system/*.json` off disk, so the app says the
+choice is arbitrary rather than naming a winner.
+
+A vendor **base** — `instantiation: "false"`, like `fdm_filament_common` — is
+exempt, and this is the part that looks wrong and is not: a base never enters a
+collection at all
+([PresetBundle.cpp:4929](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4929)),
+so two vendors shipping one is not a clash and is not reported as one.
 
 ### 4. The same value is written two different ways
 
