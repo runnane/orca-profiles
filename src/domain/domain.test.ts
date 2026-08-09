@@ -1039,6 +1039,39 @@ describe('printer compatibility', () => {
     });
   });
 
+  it('never offers a vendor base preset, which the slicer does not load at all', () => {
+    // `instantiation: "false"` means the loader stores a config map for others to
+    // inherit and returns before constructing a preset (PresetBundle.cpp:4929) —
+    // so `fdm_filament_common` is not selectable for any printer, and listing it
+    // as "available" would describe something that is not there.
+    const names = [...c.filaments, ...c.processes].map((x) => x.preset.name);
+    expect(names).not.toContain('fdm_filament_common');
+    expect(names).not.toContain('fdm_filament_abs');
+    expect(names).not.toContain('fdm_process_common');
+    // …but an instantiable vendor preset is still offered.
+    expect(names).toContain('Acme PLA @System');
+  });
+
+  it('keeps the Template vendor exception', () => {
+    // The guard is `instantiation == "false" && "Template" != vendor_name`
+    // (PresetBundle.cpp:4929), so a Template-vendor base *is* loaded.
+    const built = buildIndex([
+      { path: 'user/default/machine/m.json', text: JSON.stringify({ name: 'M' }) },
+      {
+        path: 'system/Template/filament/base.json',
+        text: JSON.stringify({ name: 'Template Base', instantiation: 'false' }),
+      },
+      {
+        path: 'system/Acme/filament/base.json',
+        text: JSON.stringify({ name: 'Acme Base', instantiation: 'false' }),
+      },
+    ]);
+    const r = compatibilityFor(built, built.presets.find((p) => p.name === 'M')!);
+    const names = r.filaments.map((x) => x.preset.name);
+    expect(names).toContain('Template Base');
+    expect(names).not.toContain('Acme Base');
+  });
+
   it('summarises without re-deriving anything', () => {
     const s = compatibilitySummary(c.filaments);
     expect(s.yes + s.no + s.undetermined).toBe(c.filaments.length);

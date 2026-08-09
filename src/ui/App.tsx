@@ -15,8 +15,9 @@ import { CompareView } from './CompareView';
 import { GraphView } from './GraphView';
 import { HealthReport } from './HealthReport';
 import { PresetDetail } from './PresetDetail';
+import { PrinterView } from './PrinterView';
 
-type Tab = 'presets' | 'graph' | 'health' | 'compare';
+type Tab = 'presets' | 'graph' | 'printer' | 'health' | 'compare';
 
 const KINDS: PresetKind[] = ['filament', 'process', 'machine'];
 const ORIGINS: PresetOrigin[] = ['user', 'system'];
@@ -31,6 +32,7 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string>('');
   const [compareA, setCompareA] = useState('');
   const [compareB, setCompareB] = useState('');
+  const [printerId, setPrinterId] = useState('');
 
   const [query, setQuery] = useState('');
   const [kinds, setKinds] = useState<Set<PresetKind>>(new Set(KINDS));
@@ -241,6 +243,14 @@ export function App() {
           <button
             type="button"
             role="tab"
+            aria-selected={tab === 'printer'}
+            onClick={() => setTab('printer')}
+          >
+            Printer
+          </button>
+          <button
+            type="button"
+            role="tab"
             aria-selected={tab === 'health'}
             onClick={() => setTab('health')}
           >
@@ -348,6 +358,15 @@ export function App() {
             ))}
 
           {tab === 'graph' && <GraphView index={index} onSelect={showPreset} />}
+
+          {tab === 'printer' && (
+            <PrinterView
+              index={index}
+              machineId={printerId}
+              onPickMachine={setPrinterId}
+              onSelect={showPreset}
+            />
+          )}
 
           {tab === 'health' && (
             <HealthReport index={index} onSelect={showPreset} onCompare={showCompare} />
