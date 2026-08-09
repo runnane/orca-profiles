@@ -6,7 +6,7 @@
  * in words as well as colour.
  */
 
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { analyze, type Finding, type FindingSeverity } from '../domain/analyze';
 import type { ConfigIndex } from '../domain/index-config';
 
@@ -30,15 +30,19 @@ const KIND_LABEL: Record<Finding['kind'], string> = {
 
 export function HealthReport({
   index,
+  kindFilter,
+  onKindFilter,
   onSelect,
   onCompare,
 }: {
   index: ConfigIndex;
+  /** Owned by `App` because it lives in the URL — see `url-state.ts`. */
+  kindFilter: Finding['kind'] | 'all';
+  onKindFilter: (kind: Finding['kind'] | 'all') => void;
   onSelect: (id: string) => void;
   onCompare: (a: string, b: string) => void;
 }) {
   const findings = useMemo(() => analyze(index), [index]);
-  const [kindFilter, setKindFilter] = useState<Finding['kind'] | 'all'>('all');
 
   const kinds = useMemo(() => {
     const counts = new Map<Finding['kind'], number>();
@@ -64,7 +68,7 @@ export function HealthReport({
           type="button"
           className="chip"
           aria-pressed={kindFilter === 'all'}
-          onClick={() => setKindFilter('all')}
+          onClick={() => onKindFilter('all')}
         >
           All {findings.length}
         </button>
@@ -74,12 +78,25 @@ export function HealthReport({
             type="button"
             className="chip"
             aria-pressed={kindFilter === k}
-            onClick={() => setKindFilter(k)}
+            onClick={() => onKindFilter(k)}
           >
             {KIND_LABEL[k]} {n}
           </button>
         ))}
       </div>
+
+      {/* Reachable only from a link: the filter is in the URL now, so it can name a
+          kind this config has none of. The chips above are still on screen, and
+          this says which one is empty rather than showing a blank pane. */}
+      {kindFilter !== 'all' && visible.length === 0 && (
+        <div className="notice">
+          <strong>No {KIND_LABEL[kindFilter].toLowerCase()} here.</strong> This
+          config has none — the other kinds above still have findings.{' '}
+          <button type="button" className="chip" onClick={() => onKindFilter('all')}>
+            Show all {findings.length}
+          </button>
+        </div>
+      )}
 
       {visible.map((f) => {
         const presets = f.presetIds.map((id) => index.byId.get(id)).filter((p) => p !== undefined);

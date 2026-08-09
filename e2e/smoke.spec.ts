@@ -78,3 +78,43 @@ test('loads a config and walks every tab without console errors', async ({ page 
   expect(errors).toEqual([]);
   expect([...new Set(missing)]).toEqual(['/api/health']);
 });
+
+test('a link carries the view, and Back undoes the tab rather than every chip', async ({ page }) => {
+  // A link into a tab with a filter already set. The config loads *after* the URL
+  // is read — on its own, in container mode — so loading must not throw the link
+  // away, which is the trap this asserts.
+  await page.goto('/?tab=health&health=duplicate-name');
+  await page.getByRole('button', { name: 'Load sample config' }).click();
+  // Not "Config loaded" — that heading is the Presets overview, and landing there
+  // is exactly what the link asked us not to do.
+  await expect(page.locator('.finding').first()).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole('tab', { name: 'Health' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('button', { name: /^Files never loaded/ })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  // Pressed is not the same as applied. Counted against the "All" chip rather than
+  // hardcoded, so this stays honest when the generator grows a shape.
+  const all = page.getByRole('button', { name: /^All \d+/ });
+  const total = Number(/\d+/.exec((await all.textContent()) ?? '')?.[0]);
+  const shown = await page.locator('.finding').count();
+  expect(shown).toBeGreaterThan(0);
+  expect(shown).toBeLessThan(total);
+
+  // Changing tab pushes a history entry. The health filter rides along, because
+  // leaving a tab is not the same as resetting it.
+  await page.getByRole('tab', { name: 'Presets' }).click();
+  await expect(page).toHaveURL(/health=duplicate-name/);
+  await expect(page).not.toHaveURL(/tab=/);
+
+  // Typing in the sidebar writes to the URL…
+  await page.getByPlaceholder('Search presets…').fill('Fast Draft');
+  await expect(page).toHaveURL(/q=Fast\+Draft/);
+  // …and clicking a chip replaces rather than pushes, so one Back returns to the
+  // tab we came from instead of unwinding six chip clicks.
+  await page.getByRole('button', { name: /^system/ }).click();
+  await expect(page).toHaveURL(/origins=user%2Csystem/);
+  await page.goBack();
+  await expect(page.getByRole('tab', { name: 'Health' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page).toHaveURL(/tab=health/);
+});

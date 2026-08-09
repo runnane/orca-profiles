@@ -5,7 +5,7 @@
  * to disk and nothing is sent anywhere — see `src/source/fs-access.ts`.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { stats } from '../domain/analyze';
 import { buildIndex, type ConfigFile, type ConfigIndex } from '../domain/index-config';
 import type { Preset, PresetKind, PresetOrigin } from '../domain/types';
@@ -16,8 +16,7 @@ import { GraphView } from './GraphView';
 import { HealthReport } from './HealthReport';
 import { PresetDetail } from './PresetDetail';
 import { PrinterView } from './PrinterView';
-
-type Tab = 'presets' | 'graph' | 'printer' | 'health' | 'compare';
+import { useViewState, type Tab } from './url-state';
 
 const KINDS: PresetKind[] = ['filament', 'process', 'machine'];
 const ORIGINS: PresetOrigin[] = ['user', 'system'];
@@ -28,18 +27,24 @@ export function App() {
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<Tab>('presets');
+  /**
+   * The tab and the sidebar filters live in the URL, so a reload keeps your place
+   * and a view can be linked to. `showInactive` is in there too: presets the
+   * slicer never loads stay behind a toggle so they can be found when you go
+   * looking but never pad the counts.
+   *
+   * The preset ids are deliberately *not* here — a preset id is its path, so
+   * putting one in a URL publishes a real name. That is ORCA-16.
+   */
+  const [view, updateView] = useViewState();
+  const { tab, q: query, kinds, origins, showInactive } = view;
+  // Back should undo "I went to Health", not each chip clicked on the way there.
+  const setTab = useCallback((t: Tab) => updateView({ tab: t }, { push: true }), [updateView]);
+
   const [selectedId, setSelectedId] = useState<string>('');
   const [compareA, setCompareA] = useState('');
   const [compareB, setCompareB] = useState('');
   const [printerId, setPrinterId] = useState('');
-
-  const [query, setQuery] = useState('');
-  const [kinds, setKinds] = useState<Set<PresetKind>>(new Set(KINDS));
-  const [origins, setOrigins] = useState<Set<PresetOrigin>>(new Set<PresetOrigin>(['user']));
-  // Presets the slicer never loads, kept behind a toggle so they can be found
-  // when you go looking but never pad the counts.
-  const [showInactive, setShowInactive] = useState(false);
 
   // How long the last load took, so "is it slow?" has an answer on screen
   // rather than being a matter of opinion.
@@ -47,16 +52,26 @@ export function App() {
     null,
   );
 
-  const load = useCallback((files: ConfigFile[], name: string, readMs: number) => {
-    const t0 = performance.now();
-    const built = buildIndex(files);
-    const indexMs = performance.now() - t0;
-    setIndex(built);
-    setRootName(name);
-    setTiming({ files: files.length, readMs, indexMs });
-    setSelectedId('');
-    setTab('presets');
-  }, []);
+  // The first config arrives *after* the URL has been read — in container mode it
+  // loads on its own — so honour the tab a link asked for. Opening a *second*
+  // config is a deliberate act on a different config, and starting it on Presets
+  // is right.
+  const loadedOnce = useRef(false);
+
+  const load = useCallback(
+    (files: ConfigFile[], name: string, readMs: number) => {
+      const t0 = performance.now();
+      const built = buildIndex(files);
+      const indexMs = performance.now() - t0;
+      setIndex(built);
+      setRootName(name);
+      setTiming({ files: files.length, readMs, indexMs });
+      setSelectedId('');
+      if (loadedOnce.current) setTab('presets');
+      loadedOnce.current = true;
+    },
+    [setTab],
+  );
 
   const openPicker = useCallback(async () => {
     setError(null);
@@ -150,12 +165,12 @@ export function App() {
     setCompareA(a);
     setCompareB(b);
     setTab('compare');
-  }, []);
+  }, [setTab]);
 
   const showPreset = useCallback((id: string) => {
     setSelectedId(id);
     setTab('presets');
-  }, []);
+  }, [setTab]);
 
   // Keep the selection valid when filters change it out of view.
   useEffect(() => {
@@ -285,7 +300,7 @@ export function App() {
                 type="search"
                 placeholder="Search presets…"
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                onChange={(e) => updateView({ q: e.target.value })}
               />
               <div className="chips">
                 {ORIGINS.map((o) => (
@@ -294,7 +309,7 @@ export function App() {
                     type="button"
                     className="chip"
                     aria-pressed={origins.has(o)}
-                    onClick={() => setOrigins(toggle(origins, o))}
+                    onClick={() => updateView({ origins: toggle(origins, o) })}
                   >
                     {o} {o === 'user' ? s.user : s.system}
                   </button>
@@ -307,7 +322,7 @@ export function App() {
                     type="button"
                     className="chip"
                     aria-pressed={kinds.has(k)}
-                    onClick={() => setKinds(toggle(kinds, k))}
+                    onClick={() => updateView({ kinds: toggle(kinds, k) })}
                   >
                     {k}
                   </button>
@@ -319,7 +334,7 @@ export function App() {
                     type="button"
                     className="chip"
                     aria-pressed={showInactive}
-                    onClick={() => setShowInactive((v) => !v)}
+                    onClick={() => updateView({ showInactive: !showInactive })}
                     title={`OrcaSlicer loads only user/${index.activeProfile}`}
                   >
                     include profiles the slicer ignores
@@ -369,7 +384,13 @@ export function App() {
           )}
 
           {tab === 'health' && (
-            <HealthReport index={index} onSelect={showPreset} onCompare={showCompare} />
+            <HealthReport
+              index={index}
+              kindFilter={view.healthKind}
+              onKindFilter={(k) => updateView({ healthKind: k })}
+              onSelect={showPreset}
+              onCompare={showCompare}
+            />
           )}
 
           {tab === 'compare' && (

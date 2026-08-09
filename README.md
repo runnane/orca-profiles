@@ -349,6 +349,28 @@ authenticates, rather than exposing this port.
 Verify exposure **from a different machine** — a request made on the host itself
 proves nothing, since loopback answers either way.
 
+## Linking to a view
+
+The tab, the sidebar's search and filters, and the health kind filter are in the
+query string, so a view survives a reload — which in container mode is the normal
+way to pick up a changed config — and can be sent to someone with the same
+config:
+
+```
+?tab=health&health=duplicate-name
+?q=draft&origins=user%2Csystem&inactive=1
+```
+
+Only what differs from the default is written, so a fresh app has a bare URL and
+a link says exactly what it means. An unknown value falls back to the default
+rather than rendering nothing. Clicking chips replaces the history entry;
+changing tab adds one, so Back undoes the navigation and not each chip on the way.
+
+**Which preset is open is deliberately not in there.** A preset id is its path, so
+that key would put a real preset or printer name into a string designed to be
+pasted elsewhere — see ORCA-16, where that trade is being decided rather than
+defaulted.
+
 ## Layout
 
 | Path | What |
