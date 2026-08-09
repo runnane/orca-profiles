@@ -13,9 +13,17 @@ import { describe, expect, it } from 'vitest';
 import { analyze, stats } from './analyze';
 import { compatibilityFor, compatibilitySummary } from './compatibility';
 import { diffEffective, diffRaw } from './diff';
-import { buildIndex, loadOrder, lookupParent, type ConfigIndex } from './index-config';
+import { buildGraph } from './graph';
+import {
+  buildIndex,
+  classifyReference,
+  loadOrder,
+  lookupParent,
+  type ConfigIndex,
+} from './index-config';
 import { loadConfigDir } from './load-fixtures';
 import { parseQuotedList, scalarAsList, valuesEqual } from './normalize';
+import { presetReferences, referenceNames } from './references';
 import { isSensitiveKey, maskValue, redactConfJson, redactPresetJson, REDACTED } from './redact';
 import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
 
@@ -239,9 +247,9 @@ describe('analyze', () => {
   });
 
   it('flags a missing parent', () => {
-    const f = findings.find((x) => x.kind === 'broken-parent');
+    const f = findings.find((x) => x.kind === 'broken-parent' && x.title.includes('Orphaned Profile'));
     expect(f?.severity).toBe('high');
-    expect(f?.title).toContain('Orphaned Profile');
+    expect(f?.reference?.unresolved[0].reason).toBe('absent');
   });
 
   it('flags a preset limited to printers that are gone', () => {
@@ -283,10 +291,244 @@ describe('analyze', () => {
     expect(seq).toEqual([...seq].sort((a, b) => a - b));
   });
 
-  it('gives every finding at least one preset', () => {
+  it('gives every finding something to act on', () => {
+    // A vendor-index finding is about files rather than presets, so it names
+    // paths instead — but a finding with neither cannot be acted on at all.
     for (const f of findings) {
-      if (f.kind !== 'parse-error') expect(f.presetIds.length).toBeGreaterThan(0);
+      if (f.kind === 'parse-error') continue;
+      expect(f.presetIds.length + (f.paths?.length ?? 0)).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('dangling references', () => {
+  const findings = analyze(index);
+  const refs = findings.filter((f) => f.reference);
+
+  it('checks the serialised list form, not only the JSON array', () => {
+    // `Legacy PETG` writes `compatible_printers` as an array and `Retired PETG`
+    // writes the same fault as '"A";"B"'. The array-only check saw only the
+    // first, so this is the assertion that goes red if the parsing regresses.
+    const orphans = findings.filter((f) => f.kind === 'orphaned-printer').map((f) => f.title);
+    expect(orphans.some((t) => t.includes('Legacy PETG'))).toBe(true);
+    expect(orphans.some((t) => t.includes('Retired PETG'))).toBe(true);
+  });
+
+  it('flags a filament pinned to a process that is not installed', () => {
+    const f = refs.find(
+      (x) => x.reference?.key === 'compatible_prints' && x.title.includes('Studio ABS Fine Only'),
+    );
+    expect(f?.kind).toBe('missing-reference');
+    expect(f?.reference?.unresolved).toEqual([
+      { name: '0.10mm Ultrafine @Acme', reason: 'absent', targetPath: undefined },
+    ]);
+    expect(f?.detail).toContain('is_compatible_with_print');
+  });
+
+  it("flags a printer's default process but not its default filament", () => {
+    const own = refs.filter((f) => f.title.includes('Workshop Cube MK2'));
+    expect(own.map((f) => f.reference?.key)).toEqual(['default_print_profile']);
+    expect(own[0].detail).toContain('first visible');
+  });
+
+  it('says a parent exists but sits in a profile the slicer never loads', () => {
+    const f = findings.find((x) => x.title.includes('Wants Cloud Base'));
+    expect(f?.kind).toBe('broken-parent');
+    expect(f?.reference?.unresolved[0].reason).toBe('unloaded-profile');
+    // The point of the reason: the fix is "copy it here", not "recreate it".
+    expect(f?.detail).toContain('cloud-0000-1111');
+    expect(f?.detail).toContain('PresetBundle.cpp:528');
+  });
+
+  it('says a parent is the wrong kind rather than resolving it across kinds', () => {
+    const f = findings.find((x) => x.title.includes('Muddled ABS'));
+    expect(f?.reference?.unresolved[0].reason).toBe('wrong-kind');
+    // The failing direction: if `inherits` ever resolves filament -> process
+    // again, this preset gets a chain it does not have in the slicer.
+    const muddled = byFile('user/default/filament/Muddled ABS.json');
+    expect(inheritanceChain(index, muddled).chain).toHaveLength(1);
+  });
+
+  it('reports a vendor index entry whose file is not there', () => {
+    const f = refs.find((x) => x.reference?.key === 'filament_list');
+    expect(f?.title).toContain('Globex TPU @System');
+    expect(f?.paths).toContain('system/Globex.json');
+    expect(f?.presetIds).toEqual([]);
+  });
+
+  it('treats a missing printer model file as the more serious fault', () => {
+    const f = refs.find((x) => x.reference?.key === 'machine_model_list');
+    expect(f?.severity).toBe('high');
+    expect(f?.title).toContain('Globex Slab');
+    // Not "an untidy index": every preset of that model is rejected on load.
+    expect(f?.detail).toContain('4819');
+  });
+
+  it('flags a system printer preset naming a model its vendor does not declare', () => {
+    const f = refs.find((x) => x.reference?.key === 'printer_model');
+    expect(f?.title).toContain('Globex Box 0.4 nozzle');
+    expect(f?.severity).toBe('high');
+  });
+
+  it('does not flag the vendor printer preset that is declared correctly', () => {
+    // Acme Cube 0.4 nozzle names a model Acme declares and a variant that model
+    // lists, so neither check may fire on it.
+    for (const f of refs) expect(f.title).not.toContain('Acme Cube 0.4 nozzle');
+  });
+
+  it('never reads a condition as a name', () => {
+    // `compatible_printers_condition` is a PlaceholderParser expression and is
+    // only consulted when the list is empty (Preset.cpp:825). Treating it as a
+    // name would invent an orphan in a config that works.
+    const built = buildIndex([
+      { path: 'user/default/machine/m.json', text: JSON.stringify({ name: 'M', inherits: '' }) },
+      {
+        path: 'user/default/filament/f.json',
+        text: JSON.stringify({
+          name: 'F',
+          inherits: '',
+          compatible_printers: [],
+          compatible_printers_condition: 'printer_notes=~/.*ACME.*/ and nozzle_diameter[0]==0.4',
+        }),
+      },
+    ]);
+    expect(analyze(built).filter((f) => f.reference)).toEqual([]);
+  });
+
+  it('honours the parent-printer rule instead of inventing an orphan', () => {
+    // A `compatible_printers` entry is also satisfied by a user printer that
+    // *inherits* that name (Preset.cpp:798-806), even when no preset by the name
+    // is installed. Reporting it would be a false finding.
+    const built = buildIndex([
+      {
+        path: 'user/default/machine/m.json',
+        text: JSON.stringify({ name: 'Shop Printer', inherits: 'Vendor Base 0.4' }),
+      },
+      {
+        path: 'user/default/filament/f.json',
+        text: JSON.stringify({ name: 'F', inherits: '', compatible_printers: ['Vendor Base 0.4'] }),
+      },
+    ]);
+    expect(analyze(built).some((f) => f.kind === 'orphaned-printer')).toBe(false);
+  });
+
+  it('resolves the slicer\'s Generic rewrite rather than calling it broken', () => {
+    // `find_preset2(name, auto_match)` retries a `Generic …` name as
+    // `Generic … @System` (Preset.cpp:3229-3245). Not modelling that reports a
+    // parent as missing when the slicer finds it.
+    const built = buildIndex([
+      {
+        path: 'system/OrcaFilamentLibrary/filament/Generic PLA @System.json',
+        text: JSON.stringify({ name: 'Generic PLA @System', layer_height: '0.2' }),
+      },
+      {
+        path: 'user/default/filament/mine.json',
+        text: JSON.stringify({ name: 'Mine', inherits: 'Generic PLA' }),
+      },
+    ]);
+    const mine = built.presets.find((p) => p.name === 'Mine')!;
+    expect(lookupParent(built, 'Generic PLA', mine)?.name).toBe('Generic PLA @System');
+    expect(analyze(built).some((f) => f.kind === 'broken-parent')).toBe(false);
+  });
+});
+
+describe('reference enumeration', () => {
+  it('reads both serialisations of a name list', () => {
+    expect(referenceNames({ compatible_printers: ['A', 'B'] }, 'compatible_printers')).toEqual([
+      'A',
+      'B',
+    ]);
+    expect(referenceNames({ compatible_printers: '"A";"B c"' }, 'compatible_printers')).toEqual([
+      'A',
+      'B c',
+    ]);
+    // A single name is not a list, and must not be split into characters or
+    // dropped for want of a separator.
+    expect(referenceNames({ default_print_profile: 'One Name' }, 'default_print_profile')).toEqual([
+      'One Name',
+    ]);
+  });
+
+  it('treats an empty list as "no constraint", not as a name', () => {
+    // Empty means "every printer" (Preset.cpp:826); yielding an empty-string name
+    // would turn that into a dangling reference.
+    for (const v of [[], '', ['', '']]) {
+      expect(referenceNames({ compatible_printers: v }, 'compatible_printers')).toEqual([]);
+    }
+  });
+
+  it('only enumerates the keys that key actually means something on', () => {
+    const filament = byFile('user/default/filament/Studio ABS Fine Only.json');
+    expect(presetReferences(filament).map((r) => r.key).sort()).toEqual([
+      'compatible_printers',
+      'compatible_prints',
+      'inherits',
+    ]);
+    // A process is gated by printers only — never by other processes.
+    const process = byFile('user/default/process/0.28mm Draft @Acme - Copy.json');
+    expect(presetReferences(process).map((r) => r.key)).toEqual(['inherits']);
+  });
+});
+
+describe('reference classification', () => {
+  const preset = (path: string, raw: Record<string, unknown>) => ({
+    path,
+    text: JSON.stringify(raw),
+  });
+
+  it('points a clashing name at the file that actually wins', () => {
+    // Two files claim one name; the reference resolves to whichever the slicer
+    // loads first, and the others are dead. A graph edge drawn to a loser would
+    // show a chain nothing has.
+    const built = buildIndex([
+      preset('user/default/process/base/Root.json', { name: 'Root', inherits: '' }),
+      preset('user/default/process/other.json', { name: 'Root', inherits: '' }),
+      preset('user/default/process/child.json', { name: 'Child', inherits: 'Root' }),
+    ]);
+    const child = built.presets.find((p) => p.name === 'Child')!;
+    const r = classifyReference(built, child, 'process', 'Root');
+    expect(r.reason).toBe('shadowed');
+    expect(r.target?.path).toBe('user/default/process/base/Root.json');
+    expect(r.others.map((o) => o.path)).toEqual(['user/default/process/other.json']);
+    // `base/` is loaded first by guarantee (Preset.cpp:1583), so this one is not
+    // a coin toss and must not be reported as one.
+    expect(r.arbitrary).toBe(false);
+  });
+
+  it('admits when a clash is decided by directory order', () => {
+    const built = buildIndex([
+      preset('user/default/process/a.json', { name: 'Root', inherits: '' }),
+      preset('user/default/process/b.json', { name: 'Root', inherits: '' }),
+      preset('user/default/process/child.json', { name: 'Child', inherits: 'Root' }),
+    ]);
+    const child = built.presets.find((p) => p.name === 'Child')!;
+    expect(classifyReference(built, child, 'process', 'Root').arbitrary).toBe(true);
+  });
+
+  it('does not accept a sync snapshot as the thing a name refers to', () => {
+    const built = buildIndex([
+      preset('user/cloud-1/_local/snap/process/Root.json', { name: 'Root', inherits: '' }),
+      preset('user/default/process/child.json', { name: 'Child', inherits: 'Root' }),
+    ]);
+    const child = built.presets.find((p) => p.name === 'Child')!;
+    expect(classifyReference(built, child, 'process', 'Root').reason).toBe('absent');
+  });
+});
+
+describe('vendor index', () => {
+  it('does not count a printer model file as a machine preset', () => {
+    // Model files sit in `machine/` beside the presets, and the slicer parses
+    // them into `vendor_profile.models` (PresetBundle.cpp:4712-4820). Counting
+    // one as a preset invents a machine that cannot be selected.
+    expect(index.presets.some((p) => p.path === 'system/Acme/machine/Acme Cube.json')).toBe(false);
+    expect(index.vendorModels.find((m) => m.id === 'Acme Cube')?.variants).toEqual(['0.4', '0.6']);
+  });
+
+  it('records whether each index entry has a file behind it', () => {
+    const missing = index.vendorRefs.filter((r) => !r.present).map((r) => r.name);
+    expect(missing).toContain('Globex TPU @System');
+    expect(missing).toContain('Globex Slab');
+    expect(index.vendorRefs.filter((r) => r.name === 'fdm_filament_common')[0].present).toBe(true);
   });
 });
 
@@ -307,6 +549,130 @@ describe('dead files', () => {
   it('disambiguates titles when a name is claimed more than once', () => {
     const titles = findings.filter((f) => f.kind === 'detached').map((f) => f.title);
     expect(new Set(titles).size).toBe(titles.length);
+  });
+});
+
+describe('inheritance graph', () => {
+  const g = buildGraph(index);
+  const node = (file: string) => {
+    const n = g.nodes.find((x) => x.id.endsWith(file));
+    if (!n) throw new Error(`not in the graph: ${file}`);
+    return n;
+  };
+  const edgeFrom = (file: string) => g.edges.find((e) => e.childId.endsWith(file));
+
+  it('holds every user preset and only the system presets they inherit from', () => {
+    // The scale rule: a real config is a user folder plus a few thousand vendor
+    // presets, so the default view is the part that is yours plus its ancestry.
+    const user = index.active.filter((p) => p.origin === 'user');
+    for (const p of user) expect(g.nodes.some((n) => n.id === p.id)).toBe(true);
+    const system = g.nodes.filter((n) => n.origin === 'system');
+    expect(system.length).toBeGreaterThan(0);
+    expect(system.length).toBeLessThan(index.active.filter((p) => p.origin === 'system').length);
+    expect(g.omitted.systemOnly).toBeGreaterThan(0);
+    // Nothing the slicer does not load, unless asked for.
+    expect(g.nodes.every((n) => n.scope === 'active')).toBe(true);
+    expect(g.omitted.snapshots).toBeGreaterThan(0);
+  });
+
+  it('gives every node exactly one edge per `inherits` it declares', () => {
+    const withParent = g.nodes.filter((n) => index.byId.get(n.id)?.inherits);
+    expect(g.edges).toHaveLength(withParent.length);
+    expect(new Set(g.edges.map((e) => e.childId)).size).toBe(g.edges.length);
+  });
+
+  it('draws the edge at the file load order actually picks', () => {
+    // Two files claim "Studio Base"; `base/` is loaded first (Preset.cpp:1583),
+    // so the child's parent is that one. This is the assertion that fails if the
+    // graph ever matches names itself instead of asking `lookupParent`.
+    const e = edgeFrom('Studio Base Fine.json');
+    expect(e?.resolved).toBe(true);
+    expect(e?.parentId).toBe('user/default/process/base/Studio Base.json');
+    expect(e?.ambiguous).toBe(true);
+    // And the file that lost is in the graph, marked dead rather than omitted.
+    expect(node('user/default/process/Studio Base.json').shadowed).toBe(true);
+    expect(node('process/base/Studio Base.json').shadowed).toBe(false);
+  });
+
+  it('draws a loop as a marked back edge instead of following it', () => {
+    const a = edgeFrom('Loop A.json');
+    const b = edgeFrom('Loop B.json');
+    expect(a?.back).toBe(true);
+    expect(b?.back).toBe(true);
+    // Both presets are still in the graph: dropping them would hide the fault.
+    expect(node('Loop A.json')).toBeDefined();
+    expect(node('Loop B.json')).toBeDefined();
+    // …and the walk terminated, which is the whole reason for the visited set.
+    expect(new Set(g.nodes.map((n) => n.id)).size).toBe(g.nodes.length);
+  });
+
+  it('marks an ordinary edge as neither back nor ambiguous', () => {
+    // The failing direction for the two flags above: if either is computed
+    // wrongly, a config with no loop and no clash lights up everywhere.
+    const e = edgeFrom('user/default/filament/Studio ABS.json');
+    expect(e).toMatchObject({ resolved: true, back: false, ambiguous: false });
+  });
+
+  it('says why an edge did not resolve', () => {
+    expect(edgeFrom('Orphaned Profile.json')).toMatchObject({
+      resolved: false,
+      reason: 'absent',
+      parentId: undefined,
+    });
+  });
+
+  it('measures a root by what it carries', () => {
+    // "Which vendor base is carrying most of my presets" — the question a list of
+    // chains cannot answer.
+    const root = node('system/Acme/process/fdm_process_common.json');
+    expect(root.depth).toBe(0);
+    expect(root.subtreeSize).toBeGreaterThan(3);
+    expect(g.roots).toContain(root.id);
+    const leaf = node('0.28mm Draft @Acme - Copy.json');
+    expect(leaf.depth).toBe(4);
+    expect(leaf.rootId).toBe(root.id);
+    expect(leaf.subtreeSize).toBe(1);
+  });
+
+  it('orders nodes depth-first so a parent always precedes its children', () => {
+    const at = new Map(g.nodes.map((n, i) => [n.id, i]));
+    for (const e of g.edges) {
+      if (!e.parentId || e.back) continue;
+      expect(at.get(e.parentId)!).toBeLessThan(at.get(e.childId)!);
+    }
+  });
+
+  it('separates a detached copy from one rooted in a vendor preset', () => {
+    // A detached full copy is its own root — that *is* the finding, drawn.
+    const detached = node('user/default/process/Fast Draft.json');
+    expect(detached.rootId).toBe(detached.id);
+    // A detached copy changes nothing — it has no parent to change — but it does
+    // set everything, and reporting that as "0 overrides" read as "sets nothing".
+    expect(detached.changed).toBe(0);
+    expect(detached.novel).toBeGreaterThan(100);
+    expect(detached.settings).toBeGreaterThan(100);
+    const rooted = node('user/default/filament/Studio ABS.json');
+    expect(rooted.rootId).not.toBe(rooted.id);
+    expect(rooted.changed).toBeGreaterThan(0);
+    expect(rooted.novel).toBeGreaterThan(0);
+  });
+
+  it('brings in the profiles the slicer ignores only when asked', () => {
+    const wide = buildGraph(index, { includeInactive: true, includeSystemOnly: true });
+    expect(wide.nodes.length).toBeGreaterThan(g.nodes.length);
+    expect(wide.nodes.some((n) => n.scope === 'inactive-profile')).toBe(true);
+    expect(wide.omitted.systemOnly).toBe(0);
+    // A snapshot is never drawn, at any setting: the slicer never loads one.
+    expect(wide.nodes.every((n) => n.scope !== 'snapshot')).toBe(true);
+  });
+
+  it('filters by kind without stranding an ancestor', () => {
+    const filaments = buildGraph(index, { kinds: ['filament'] });
+    expect(filaments.nodes.every((n) => n.kind === 'filament')).toBe(true);
+    for (const e of filaments.edges) {
+      if (!e.parentId) continue;
+      expect(filaments.nodes.some((n) => n.id === e.parentId)).toBe(true);
+    }
   });
 });
 

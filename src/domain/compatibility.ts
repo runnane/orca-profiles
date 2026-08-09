@@ -53,55 +53,9 @@
  * ORCA-7 evaluates a documented subset of them and leaves the rest undetermined.
  */
 
-import { loadOrder, type ConfigIndex } from './index-config';
-import { parseQuotedList } from './normalize';
+import { shadowedIds, type ConfigIndex } from './index-config';
+import { referenceNames } from './references';
 import type { Preset } from './types';
-
-/**
- * The names in a list-valued key, in either serialisation.
- *
- * A preset saved by the slicer writes a vector as a JSON array; one round-tripped
- * through an export or hand-edited writes `'"A";"B"'`. Reading only the array form
- * would silently treat a hand-edited `compatible_printers` as empty — that is,
- * "compatible with everything", the exact opposite of what it says.
- *
- * ORCA-2 introduces `referenceNames` in `references.ts`, which is this function
- * for every reference key at once. When that lands, this goes and the import
- * replaces it. Empty means empty on purpose: an empty `compatible_printers` is
- * "every printer" (Preset.cpp:826), not "no printer".
- */
-function namesOf(p: Preset, key: string): string[] {
-  const v = p.raw[key];
-  if (v === undefined) return [];
-  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter((x) => x !== '');
-  const text = String(v).trim();
-  if (text === '') return [];
-  return parseQuotedList(text)
-    .map((x) => x.trim())
-    .filter((x) => x !== '');
-}
-
-/**
- * Presets the slicer never loads because another file claimed the name first
- * (Preset.cpp:1619). Grouped as the slicer's collections are — the system bundles
- * plus one user folder.
- *
- * ORCA-3 lifts the same rule out of `analyze` into `index-config.shadowedIds`;
- * whichever lands second should delete this copy.
- */
-function shadowed(index: ConfigIndex): Set<string> {
-  const out = new Set<string>();
-  const groups = new Map<string, Preset[]>();
-  for (const p of index.active) {
-    const k = `${p.origin}:${p.profile ?? p.vendor ?? ''}:${p.kind}:${p.name}`;
-    groups.set(k, [...(groups.get(k) ?? []), p]);
-  }
-  for (const group of groups.values()) {
-    if (group.length < 2) continue;
-    for (const loser of loadOrder(group).slice(1)) out.add(loser.id);
-  }
-  return out;
-}
 
 /** The vendor whose filaments carry the derived exclusion list. */
 const FILAMENT_LIBRARY = 'OrcaFilamentLibrary';
@@ -194,14 +148,14 @@ function libraryExclusions(index: ConfigIndex): Map<string, Set<string>> {
   for (const p of index.active) {
     if (p.kind !== 'filament' || p.vendor !== FILAMENT_LIBRARY) continue;
     const alias = aliasOf(p);
-    if (alias === '' || namesOf(p, 'compatible_printers').length > 0) continue;
+    if (alias === '' || referenceNames(p.raw, 'compatible_printers').length > 0) continue;
     out.set(p.id, new Set());
     byAlias.set(alias, [...(byAlias.get(alias) ?? []), p.id]);
   }
 
   for (const p of index.active) {
     if (p.kind !== 'filament' || p.vendor === FILAMENT_LIBRARY) continue;
-    const claims = namesOf(p, 'compatible_printers');
+    const claims = referenceNames(p.raw, 'compatible_printers');
     if (claims.length === 0) continue;
     for (const libraryId of byAlias.get(aliasOf(p)) ?? []) {
       const set = out.get(libraryId);
@@ -217,11 +171,11 @@ export function compatibilityFor(
   machine: Preset,
   opts: CompatibilityOptions = {},
 ): PrinterCompatibility {
-  const dead = shadowed(index);
+  const dead = shadowedIds(index);
   const exclusions = libraryExclusions(index);
 
-  const defaultProcesses = new Set(namesOf(machine, 'default_print_profile'));
-  const defaultFilaments = new Set(namesOf(machine, 'default_filament_profile'));
+  const defaultProcesses = new Set(referenceNames(machine.raw, 'default_print_profile'));
+  const defaultFilaments = new Set(referenceNames(machine.raw, 'default_filament_profile'));
 
   const judge = (p: Preset): Compatibility => {
     const isDefault =
@@ -286,7 +240,7 @@ function judgePrinter(
     };
   }
 
-  const names = namesOf(p, 'compatible_printers');
+  const names = referenceNames(p.raw, 'compatible_printers');
   const condition = conditionOf(p, 'compatible_printers_condition');
 
   // 2. Empty list plus a condition: the condition is the whole answer.
@@ -334,7 +288,7 @@ function judgePrinter(
 
 /** The filament's process gate, if it carries one. */
 function gateOf(p: Preset): Compatibility['processGate'] {
-  const names = namesOf(p, 'compatible_prints');
+  const names = referenceNames(p.raw, 'compatible_prints');
   const condition = conditionOf(p, 'compatible_prints_condition');
   if (names.length === 0 && !condition) return undefined;
   return { names, ...(names.length === 0 && condition ? { condition } : {}) };
