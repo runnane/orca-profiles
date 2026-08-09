@@ -177,6 +177,36 @@ write('user/default/process/Studio Base Fine.json', {
   layer_height: '0.16',
 });
 
+// A second file claiming the custom root's name, in the folder proper. `base/` is
+// loaded first by guarantee (Preset.cpp:1583), so this one is never loaded — and
+// `Studio Base Fine` inherits the one in `base/`, not this. An inheritance edge
+// drawn to the wrong file shows a chain that does not exist.
+write('user/default/process/Studio Base.json', {
+  name: 'Studio Base',
+  from: 'User',
+  inherits: '',
+  ...bulkSettings(23),
+  layer_height: '0.32',
+  wall_loops: '1',
+});
+
+// A hand-edited loop: two presets inheriting each other. Nothing the slicer
+// writes, everything a text editor can produce — and the reason resolution has a
+// cycle guard at all. The graph has to draw the closing edge rather than follow
+// it.
+write('user/default/process/Loop A.json', {
+  name: 'Loop A',
+  from: 'User',
+  inherits: 'Loop B',
+  layer_height: '0.26',
+});
+write('user/default/process/Loop B.json', {
+  name: 'Loop B',
+  from: 'User',
+  inherits: 'Loop A',
+  top_shell_thickness: '0.9',
+});
+
 // A preset whose declared parent is not installed.
 write('user/default/process/Orphaned Profile.json', {
   name: 'Orphaned Profile',

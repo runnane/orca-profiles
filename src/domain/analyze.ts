@@ -24,7 +24,7 @@
  */
 
 import { diffEffective } from './diff';
-import { loadOrder, tieIsArbitrary, type ConfigIndex } from './index-config';
+import { loadOrder, shadowedIds, tieIsArbitrary, type ConfigIndex } from './index-config';
 import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
 import type { Preset } from './types';
 
@@ -79,19 +79,9 @@ export function analyze(index: ConfigIndex): Finding[] {
 
   // Files that lose a name clash are never loaded, so every other observation
   // about them is moot — reporting a dead file as "a detached copy" invites
-  // someone to go and fix a file the slicer has never read.
-  const shadowed = new Set<string>();
-  {
-    const groups = new Map<string, Preset[]>();
-    for (const p of index.active) {
-      const k = `${p.origin}:${p.profile ?? p.vendor ?? ''}:${p.kind}:${p.name}`;
-      groups.set(k, [...(groups.get(k) ?? []), p]);
-    }
-    for (const group of groups.values()) {
-      if (group.length < 2) continue;
-      for (const loser of loadOrder(group).slice(1)) shadowed.add(loser.id);
-    }
-  }
+  // someone to go and fix a file the slicer has never read. The graph needs the
+  // same set, so the rule lives in `shadowedIds` rather than here.
+  const shadowed = shadowedIds(index);
 
   // When a name is claimed more than once, a title using only the name is
   // ambiguous — say which file it is.
