@@ -4,7 +4,9 @@ FROM node:24-alpine AS build
 WORKDIR /app
 
 RUN corepack enable
-COPY package.json pnpm-lock.yaml ./
+# pnpm-workspace.yaml carries the overrides in pnpm 11; without it the
+# frozen install sees a different config than the lockfile records.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY . .

@@ -445,10 +445,10 @@ describe('transport redaction', () => {
     // `local_machines` is keyed by printer IP. Blanking values leaves the
     // addresses in the key positions, so the whole subtree has to go.
     const raw = JSON.stringify({
-      local_machines: { '172.20.100.236': { dev_ip: '172.20.100.236', dev_name: 'printer' } },
+      local_machines: { '192.0.2.10': { dev_ip: '192.0.2.10', dev_name: 'printer' } },
     });
     const out = redactPresetJson(raw);
-    expect(out).not.toContain('172.20.100.236');
+    expect(out).not.toContain('192.0.2.10');
     expect(out).not.toContain('printer');
     expect(JSON.parse(out).local_machines).toEqual({});
   });

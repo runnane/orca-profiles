@@ -12,3 +12,4 @@ playwright-report
 .mcp.json
 dist-cli
 dist-server
+deploy.env

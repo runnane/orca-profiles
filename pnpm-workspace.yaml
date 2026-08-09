@@ -1,0 +1,8 @@
+# pnpm 11 reads settings from here, not from the "pnpm" field in package.json.
+#
+# esbuild arrives transitively via vite. 0.28.2 was published <24h before this
+# was pinned, which pnpm's default minimumReleaseAge policy rejects — correctly,
+# and a container build with a cold store hits it. Pinning the previous release
+# keeps that protection on instead of disabling the check to get a build through.
+overrides:
+  esbuild: 0.28.1

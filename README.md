@@ -171,6 +171,45 @@ The app needs exactly one field from that file — which user profile is live �
 that is the only field served. This was found by diffing a real config against
 what the API returned; a fixture with blank credentials had reported it clean.
 
+## Deploying
+
+The config lives on the printer host, so that is where this runs. One command
+syncs the source over the LAN, builds there, and verifies the result **from the
+machine you ran it on** — a health check made on the target itself proves
+nothing about whether it is actually reachable.
+
+```bash
+cp deploy.env.example deploy.env    # once: host, config path, bind address
+pnpm deploy                         # gates → rsync → build → health → verify
+pnpm deploy --skip-gates            # when you just ran them
+```
+
+```
+1/5  Gates                    2/5  Sync → workshop:/home/jon/apps/orca-profiles
+3/5  Build and start          4/5  Wait for health        up after 2s
+5/5  Verify from bug
+  ✓ health 200 · config dir /config
+  ✓ SPA 200 · config 200 · 2608 files
+  ✓ no value survives under any credential-bearing key
+  ✓ OrcaSlicer.conf reduced to { app: { preset_folder } }
+  ✓ no private IP addresses · no device hostnames in the payload
+```
+
+Nothing leaves the LAN: no registry, no remote git, no image transfer. A deploy
+is an incremental rsync plus a docker layer-cached build, so it takes seconds.
+`--delete` keeps the remote a mirror, so a file deleted here cannot linger there
+and get built into the next image.
+
+The verification is structural, not a search for known secrets, so it needs no
+access to the real config: it asserts that nothing survives under a
+credential-bearing key, that `OrcaSlicer.conf` came back reduced to its one
+allowlisted field, and that no address-shaped string appears anywhere in the
+payload. It is checked in the failing direction — pointed at a deliberately
+leaky server it reports every one of those. A failed deploy leaves the previous
+container running.
+
+`deploy.env` is gitignored: it holds your host and LAN address.
+
 ## Exposure
 
 The container mounts the config `:ro` and publishes on **loopback by default**.
@@ -178,8 +217,8 @@ The container mounts the config `:ro` and publishes on **loopback by default**.
 
 ```bash
 ORCA_BIND=127.0.0.1    docker compose up -d   # default: this machine only
-ORCA_BIND=172.20.100.3 docker compose up -d   # a specific LAN address
-ORCA_BIND=100.64.64.3  docker compose up -d   # a tailnet address
+ORCA_BIND=192.0.2.10 docker compose up -d   # a specific LAN address
+ORCA_BIND=100.64.0.2  docker compose up -d   # a tailnet address
 ORCA_BIND=0.0.0.0      docker compose up -d   # every interface, bridges included
 ```
 
