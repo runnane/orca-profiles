@@ -35,6 +35,7 @@
 import { diffEffective } from './diff';
 import {
   classifyReference,
+  clashGroups,
   loadOrder,
   shadowedIds,
   tieIsArbitrary,
@@ -199,36 +200,43 @@ export function analyze(index: ConfigIndex): Finding[] {
   findings.push(...referenceFindings(index, userPresets, shadowed, label));
   findings.push(...vendorIndexFindings(index));
 
-  // Duplicate names within one profile. Across profiles is expected — the cloud
-  // profile mirrors the local one — so only a clash inside a single profile is
-  // an ambiguity the slicer has to break arbitrarily.
-  const nameGroups = new Map<string, Preset[]>();
-  for (const p of index.active) {
-    const k = `${p.origin}:${p.profile ?? p.vendor ?? ''}:${p.kind}:${p.name}`;
-    const g = nameGroups.get(k);
-    if (g) g.push(p);
-    else nameGroups.set(k, [p]);
-  }
-  for (const [, group] of nameGroups) {
+  // A name has to be unique inside the scope the slicer keeps it in — one user
+  // profile, or every vendor at once. `clashScope` is that rule; across *profiles*
+  // is expected, because the cloud profile mirrors the local one.
+  for (const [scope, group] of clashGroups(index)) {
     if (group.length < 2) continue;
-    // The slicer loads system bundles, then `base/`, then the rest of the
-    // folder, and refuses any name it already has. So this is not a tie the
-    // slicer breaks arbitrarily — every file after the first is never loaded.
     const ordered = loadOrder(group);
     const [winner, ...losers] = ordered;
     const arbitrary = tieIsArbitrary(group);
+    const crossVendor =
+      scope.startsWith('system:') && new Set(group.map((p) => p.vendor)).size > 1;
+
     findings.push({
       id: `shadowed:${winner.id}`,
       severity: 'high',
       kind: 'duplicate-name',
-      title: `${losers.length} file${losers.length === 1 ? ' is' : 's are'} never loaded: "${winner.name}" is claimed ${group.length} times`,
-      detail: arbitrary
-        ? `${group.length} files declare this name and OrcaSlicer loads exactly one, skipping the rest with "Preset already present, not loading" — so one of ${group
+      title: crossVendor
+        ? `${[...new Set(group.map((p) => p.vendor))].join(' and ')} both ship a preset called "${winner.name}"`
+        : `${losers.length} file${losers.length === 1 ? ' is' : 's are'} never loaded: "${winner.name}" is claimed ${group.length} times`,
+      detail: crossVendor
+        ? // Not the intra-folder rule: each vendor loads into its own bundle, and
+          // the bundles are then merged into one collection per type. The merge
+          // keeps what is already there and discards the incoming preset of the
+          // same name, logging "Found duplicated preset" (PresetBundle.cpp:2292).
+          `Two installed vendors declare this name, and OrcaSlicer holds one collection per preset type — so when the bundles are merged, one of ${group
             .map((p) => p.path)
-            .join(', ')} has no effect at all. Which one wins is decided by directory order, not by anything in the config, so it is not safe to predict. Rename or delete all but one.`
-        : `OrcaSlicer loads ${winner.path} and skips ${losers
-            .map((l) => l.path)
-            .join(', ')} with "Preset already present, not loading". Editing a skipped file has no effect at all — the settings you see in the slicer come from ${winner.path}.`,
+            .join(' and ')} is discarded and never loaded ("Found duplicated preset", PresetBundle.cpp:2292).${
+            arbitrary
+              ? ' Which one survives depends on the order the vendor files happen to be read in, so it is not safe to predict.'
+              : ` The filament library is merged first and always wins, so the one that survives is ${winner.path}.`
+          } Uninstall one of the two vendors, or expect one of them to be silently absent.`
+        : arbitrary
+          ? `${group.length} files declare this name and OrcaSlicer loads exactly one, skipping the rest with "Preset already present, not loading" — so one of ${group
+              .map((p) => p.path)
+              .join(', ')} has no effect at all. Which one wins is decided by directory order, not by anything in the config, so it is not safe to predict. Rename or delete all but one.`
+          : `OrcaSlicer loads ${winner.path} and skips ${losers
+              .map((l) => l.path)
+              .join(', ')} with "Preset already present, not loading". Editing a skipped file has no effect at all — the settings you see in the slicer come from ${winner.path}.`,
       presetIds: ordered.map((p) => p.id),
       weight: 950,
     });

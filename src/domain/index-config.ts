@@ -468,7 +468,61 @@ export function loadOrder(presets: Preset[]): Preset[] {
 }
 
 function loadRank(p: Preset): number {
-  return p.origin === 'system' ? 0 : p.isCustomRoot ? 1 : 2;
+  if (p.origin === 'system') {
+    // The filament library is merged into the bundle before any other vendor, so
+    // it wins outright; every other vendor's order comes from `directory_iterator`
+    // over `system/*.json` and is therefore not predictable.
+    return p.vendor === FILAMENT_LIBRARY_VENDOR ? 0 : 1;
+  }
+  return p.isCustomRoot ? 2 : 3;
+}
+
+/**
+ * The vendor whose bundle is loaded first, synchronously, before any other is
+ * merged in (PresetBundle.cpp:2231-2241). It therefore wins every name clash.
+ */
+export const FILAMENT_LIBRARY_VENDOR = 'OrcaFilamentLibrary';
+
+/**
+ * Is this preset one the slicer puts in a collection at all?
+ *
+ * A vendor-bundle preset marked `instantiation: "false"` is not: the loader stores
+ * it in a per-bundle config map for others to inherit and returns before
+ * constructing a `Preset` (PresetBundle.cpp:4929-4941). That map is **local to one
+ * vendor's load** and cleared per preset type (:5134), which is why two vendors
+ * shipping `fdm_process_common` is not a clash — the source spells it out: "The
+ * remaining vendors are independent (no cross-vendor inheritance)".
+ *
+ * The `Template` vendor is the documented exception in the same guard.
+ *
+ * User presets never carry the key, so they are always instantiable.
+ */
+export function isInstantiable(p: Preset): boolean {
+  return p.raw.instantiation !== 'false' || p.vendor === 'Template';
+}
+
+/**
+ * The scope a name has to be unique inside.
+ *
+ * For a **user** preset that is one profile: the same name in the live and the
+ * cloud profile is how sync works, not a fault, and the two are never loaded
+ * together anyway (PresetBundle.cpp:528).
+ *
+ * For a **system** preset it is every vendor at once. Each vendor loads into its
+ * own bundle, but the bundles are then merged into one collection per type, and
+ * `PresetCollection::merge_presets` keeps whatever is already there and discards
+ * the incoming preset of the same name — the caller logs "Found duplicated preset:
+ * X in vendor: Y" (Preset.cpp:/merge_presets/, PresetBundle.cpp:2283-2294). So a
+ * name claimed by two vendors means one of those files is dead.
+ *
+ * Returns `undefined` for a preset that never enters a collection, since it cannot
+ * clash with anything.
+ */
+export function clashScope(p: Preset): string | undefined {
+  if (!isInstantiable(p)) return undefined;
+  return p.origin === 'system'
+    ? `system:${p.kind}:${p.name}`
+    : `user:${p.profile ?? ''}:${p.kind}:${p.name}`;
 }
 
 /**
@@ -484,17 +538,25 @@ function loadRank(p: Preset): number {
  */
 export function shadowedIds(index: ConfigIndex): Set<string> {
   const out = new Set<string>();
-  const groups = new Map<string, Preset[]>();
-  for (const p of index.active) {
-    const k = `${p.origin}:${p.profile ?? p.vendor ?? ''}:${p.kind}:${p.name}`;
-    groups.set(k, [...(groups.get(k) ?? []), p]);
-  }
-  for (const group of groups.values()) {
+  for (const group of clashGroups(index).values()) {
     if (group.length < 2) continue;
     for (const loser of loadOrder(group).slice(1)) out.add(loser.id);
   }
   return out;
 }
+
+/** Presets grouped by the scope their name has to be unique in. */
+export function clashGroups(index: ConfigIndex): Map<string, Preset[]> {
+  const groups = new Map<string, Preset[]>();
+  for (const p of index.active) {
+    const k = clashScope(p);
+    if (k === undefined) continue;
+    groups.set(k, [...(groups.get(k) ?? []), p]);
+  }
+  return groups;
+}
+
+
 
 /** True when the top two candidates share a rank, so which one wins is luck. */
 export function tieIsArbitrary(presets: Preset[]): boolean {

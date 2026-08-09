@@ -44,6 +44,8 @@ rmSync(ROOT, { recursive: true, force: true });
 // public product data rather than anything personal.
 
 const acmeFilaments = [
+  // Claimed by Globex too — see the note there.
+  ['Shared PLA @System', { name: 'Shared PLA @System', inherits: 'fdm_filament_common', nozzle_temperature: '208' }],
   ['fdm_filament_common', { name: 'fdm_filament_common', instantiation: 'false', ...bulkSettings(1), nozzle_temperature: '200', filament_flow_ratio: '0.98' }],
   ['fdm_filament_abs', { name: 'fdm_filament_abs', instantiation: 'false', inherits: 'fdm_filament_common', nozzle_temperature: '250', hot_plate_temp: '90' }],
   ['Acme ABS @System', { name: 'Acme ABS @System', inherits: 'fdm_filament_abs', setting_id: 'ACMEABS000000001', filament_max_volumetric_speed: '8' }],
@@ -112,6 +114,12 @@ write('system/Acme.json', {
 
 const globexFilaments = [
   ['Globex PETG @System', { name: 'Globex PETG @System', inherits: 'fdm_filament_common', nozzle_temperature: '240' }],
+  // The same name Acme ships below. Both are instantiable, so both end up in the
+  // one collection the slicer keeps per preset type — and the merge discards
+  // whichever arrives second ("Found duplicated preset", PresetBundle.cpp:2292).
+  // Deliberately *not* an `fdm_*` base: a base never enters a collection, so two
+  // vendors shipping one is not a clash at all.
+  ['Shared PLA @System', { name: 'Shared PLA @System', inherits: 'fdm_filament_common', nozzle_temperature: '205' }],
 ];
 for (const [, p] of globexFilaments) write(`system/Globex/filament/${p.name}.json`, p);
 
@@ -295,6 +303,15 @@ write('user/default/machine/Workshop Cube MK2.json', {
   // filament is, so only one of the two is a finding.
   default_print_profile: '0.16mm Fine @Acme',
   default_filament_profile: ['Studio ABS'],
+});
+
+// Inherits a name two vendors claim. Whichever vendor's file survives the merge
+// decides what this preset resolves to.
+write('user/default/filament/Studio Shared.json', {
+  name: 'Studio Shared',
+  from: 'User',
+  inherits: 'Shared PLA @System',
+  filament_max_volumetric_speed: '11',
 });
 
 // A filament limited to printers that are not installed.
