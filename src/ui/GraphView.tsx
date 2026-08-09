@@ -27,6 +27,8 @@
 
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { buildGraph, type GraphEdge, type GraphNode } from '../domain/graph';
+import { CodeText } from './CodeText';
+import { plainText } from './text';
 import type { ConfigIndex } from '../domain/index-config';
 import type { PresetKind } from '../domain/types';
 
@@ -35,6 +37,27 @@ const KINDS: PresetKind[] = ['filament', 'process', 'machine'];
 /** Row pitch and indent, in px. Fixed, so edge geometry needs no measurement. */
 const ROW = 40;
 const INDENT = 26;
+
+/**
+ * What each badge means, and what it costs — keyed by the label on screen.
+ *
+ * These exist because a badge that states a verdict without its consequence is
+ * alarming and unactionable at the same time, and `detached copy` is the one
+ * people meet first. Rendered as real text on the page (not only as a `title`,
+ * which is unreachable on touch and by keyboard) and used as each badge's tooltip.
+ */
+const BADGE_HELP: Record<string, string> = {
+  'detached copy':
+    'No parent, so it stores every setting itself. Vendor updates never reach it, and there is no way to see which values you deliberately changed — this is the usual reason a preset is hundreds of keys long.',
+  'custom root':
+    'Saved detached into the kind’s base/ folder, which OrcaSlicer loads first so that other presets can inherit it by name (Preset.cpp:1583). It always carries “detached copy” as well: being detached is the point of it, not a second fault.',
+  'never loaded':
+    'Another file claimed this name first, so OrcaSlicer skips this one entirely (Preset.cpp:1619). Editing it changes nothing, and everything else this row says about it is moot.',
+  'parent missing':
+    'Its `inherits` names a preset that does not resolve, so every value that parent would have supplied is simply absent. The Health tab says why the name did not resolve.',
+  loop:
+    'Its `inherits` chain comes back to itself. Resolution stops at the repeat, so the settings in effect are only what was collected before the loop closed.',
+};
 
 const REASON_LABEL: Record<string, string> = {
   absent: 'no preset by that name is installed',
@@ -165,6 +188,20 @@ export function GraphView({
         the one that wins.
         {graph.omitted.snapshots > 0 && ` ${graph.omitted.snapshots} sync snapshots are never drawn.`}
       </p>
+
+      <details className="graph-help">
+        <summary>What these labels mean</summary>
+        <dl>
+          {Object.entries(BADGE_HELP).map(([label, help]) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>
+                <CodeText text={help} />
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </details>
 
       <div className="graph-legend" aria-hidden="true">
         <span>
@@ -302,7 +339,7 @@ function Row({
         {node.redundant > 0 && ` · ${node.redundant} redundant`}
       </span>
       {badges.map((b) => (
-        <span key={b.label} className={`gbadge ${b.tone}`}>
+        <span key={b.label} className={`gbadge ${b.tone}`} title={plainText(BADGE_HELP[b.label])}>
           {b.label}
         </span>
       ))}

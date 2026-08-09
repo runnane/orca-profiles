@@ -447,3 +447,22 @@ td.src { width: 26%; font-size: 11px; color: var(--ink-muted); }
 .verdict.excluded .dot { background: var(--danger); }
 .verdict.undetermined { color: var(--warn); }
 .verdict.undetermined .dot { background: var(--warn); }
+
+/* graph: what the row badges mean. Real text on the page rather than a tooltip
+   only — a `title` is unreachable on touch and by keyboard. */
+.graph-help { margin: 0 0 10px; font-size: 12px; }
+.graph-help > summary {
+  cursor: pointer;
+  color: var(--ink-muted);
+  width: fit-content;
+}
+.graph-help > summary:hover { color: var(--ink); }
+.graph-help dl { margin: 8px 0 0; display: flex; flex-direction: column; gap: 6px; }
+.graph-help dt {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink);
+  font-weight: 600;
+}
+.graph-help dd { margin: 1px 0 0; color: var(--ink-muted); max-width: 70ch; }

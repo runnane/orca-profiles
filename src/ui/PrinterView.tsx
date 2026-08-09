@@ -37,6 +37,8 @@ import {
 } from '../domain/compatibility';
 import type { ConfigIndex } from '../domain/index-config';
 import type { Preset } from '../domain/types';
+import { CodeText } from './CodeText';
+import { plainText } from './text';
 
 type Verdict = 'available' | 'excluded' | 'undetermined';
 
@@ -82,28 +84,6 @@ function explain(c: Compatibility, machine: Preset): string {
   }
   return REASON_TEXT[c.reason] || `Decided by \`${c.evidence.key}\`.`;
 }
-
-/**
- * The reason sentences name config keys in backticks. Rendered as markup they
- * become `<code>`; the `aria-label` gets the same text with the ticks stripped,
- * because a screen reader should not read punctuation that only means "monospace".
- */
-function CodeText({ text }: { text: string }) {
-  return (
-    <>
-      {text.split('`').map((part, i) =>
-        i % 2 === 1 ? (
-          // eslint-disable-next-line react/no-array-index-key
-          <code key={i}>{part}</code>
-        ) : (
-          <span key={i}>{part}</span>
-        ),
-      )}
-    </>
-  );
-}
-
-const plain = (text: string) => text.replace(/`/g, '');
 
 export function PrinterView({
   index,
@@ -298,7 +278,7 @@ function Row({
       // Everything the colour says is in here as words, which is what a screen
       // reader gets and what makes the colour a second encoding rather than the
       // only one.
-      aria-label={`${c.preset.name}: ${VERDICT_LABEL[verdict]}. ${plain(explain(c, machine))}`}
+      aria-label={`${c.preset.name}: ${VERDICT_LABEL[verdict]}. ${plainText(explain(c, machine))}`}
     >
       <span className="compat-head">
         <span className={`verdict ${verdict}`}>

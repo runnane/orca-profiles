@@ -32,6 +32,12 @@ test('loads a config and walks every tab without console errors', async ({ page 
   // The graph is navigation, not a picture: a node has to be reachable by keyboard
   // and opening one has to land in the preset it names.
   await expect(page.getByRole('tree', { name: 'Inheritance forest' })).toBeVisible();
+  // The badges on each row are verdicts; a verdict with no consequence attached is
+  // alarming and unactionable at once. The explanation has to be reachable on the
+  // page, not only as a tooltip.
+  await page.getByText('What these labels mean').click();
+  await expect(page.getByText(/Vendor updates never reach it/)).toBeVisible();
+  await expect(page.getByText(/being detached is the point of it/)).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/5-graph.png`, fullPage: true });
   await page.getByRole('treeitem').last().scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${SHOTS}/6-graph-bottom.png` });
