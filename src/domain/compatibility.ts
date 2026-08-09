@@ -47,15 +47,25 @@
  *    which is a different question — so it rides along as evidence rather than as
  *    a verdict.
  *
- * Conditions are **not evaluated here**. `compatible_printers_condition` is a
- * PlaceholderParser expression, not a name list, and a guess at one is worth less
- * than saying so: those come back `undetermined` with the expression verbatim.
- * ORCA-7 evaluates a documented subset of them and leaves the rest undetermined.
+ * Conditions are evaluated only as far as `condition.ts` documents, and are
+ * `undetermined` outside that — never a boolean. `compatible_printers_condition`
+ * is a PlaceholderParser expression, not a name list, and the reason for a verdict
+ * stays `'condition'` either way: `included` carries the answer (`true` matched,
+ * `false` excluded, `'undetermined'` outside the subset) so a caller never has to
+ * read a boolean and a caveat together.
+ *
+ * The two axes see different configs, which is easy to get wrong:
+ * `compatible_printers_condition` is evaluated against the **printer's** resolved
+ * settings plus the injected `printer_preset` / `num_extruders`
+ * (Preset.cpp:845-849), while `compatible_prints_condition` is evaluated against
+ * the **process's** config with no extras (Preset.cpp:782).
  */
 
+import { evaluateCondition, printerInjectedVars, type ConditionContext } from './condition';
 import { shadowedIds, type ConfigIndex } from './index-config';
 import { referenceNames } from './references';
-import type { Preset } from './types';
+import { resolve } from './resolve';
+import type { Preset, RawValue } from './types';
 
 /** The vendor whose filaments carry the derived exclusion list. */
 const FILAMENT_LIBRARY = 'OrcaFilamentLibrary';
@@ -174,6 +184,14 @@ export function compatibilityFor(
   const dead = shadowedIds(index);
   const exclusions = libraryExclusions(index);
 
+  // The printer's *resolved* settings, so an inherited `printer_notes` is visible
+  // to a condition, plus the two variables the slicer injects rather than reads.
+  const machineSettings = resolve(index, machine).settings;
+  const printerCtx: ConditionContext = {
+    lookup: (key) => machineSettings.get(key)?.value,
+    injected: printerInjectedVars(machine.name, machineSettings.get('nozzle_diameter')?.value),
+  };
+
   const defaultProcesses = new Set(referenceNames(machine.raw, 'default_print_profile'));
   const defaultFilaments = new Set(referenceNames(machine.raw, 'default_filament_profile'));
 
@@ -193,11 +211,11 @@ export function compatibilityFor(
     }
 
     const gate = p.kind === 'filament' ? gateOf(p) : undefined;
-    const verdict = judgePrinter(p, machine, exclusions);
+    const verdict = judgePrinter(p, machine, exclusions, printerCtx);
     const out: Compatibility = { ...base, ...verdict, ...(gate ? { processGate: gate } : {}) };
 
     if (gate && opts.process) {
-      const passes = passesProcess(gate, opts.process);
+      const passes = passesProcess(gate, opts.process, index);
       out.processGate = { ...gate, passes };
       // The slicer ands the two gates together, so a filament that fails the
       // process gate is not compatible however well it matches the printer.
@@ -226,6 +244,7 @@ function judgePrinter(
   p: Preset,
   machine: Preset,
   exclusions: Map<string, Set<string>>,
+  printerCtx: ConditionContext,
 ): { included: boolean | 'undetermined'; reason: CompatibilityReason; evidence: CompatibilityEvidence } {
   // 1. The library exclusion, which is checked first and by itself.
   const excluded = exclusions.get(p.id);
@@ -246,7 +265,7 @@ function judgePrinter(
   // 2. Empty list plus a condition: the condition is the whole answer.
   if (names.length === 0 && condition) {
     return {
-      included: 'undetermined',
+      included: evaluateCondition(condition, printerCtx),
       reason: 'condition',
       evidence: { key: 'compatible_printers_condition', value: condition },
     };
@@ -297,11 +316,18 @@ function gateOf(p: Preset): Compatibility['processGate'] {
 function passesProcess(
   gate: NonNullable<Compatibility['processGate']>,
   process: Preset,
+  index: ConfigIndex,
 ): boolean | 'undetermined' {
   // Same shape as the printer gate, and deliberately without a parent clause:
   // `is_compatible_with_print` has none (Preset.cpp:771-791).
-  if (gate.names.length === 0) return gate.condition ? 'undetermined' : true;
-  return gate.names.includes(process.name);
+  if (gate.names.length > 0) return gate.names.includes(process.name);
+  if (!gate.condition) return true;
+  // Against the **process's** config, and with none of the printer's injected
+  // variables in scope (Preset.cpp:782).
+  const settings = resolve(index, process).settings;
+  return evaluateCondition(gate.condition, {
+    lookup: (key: string): RawValue | undefined => settings.get(key)?.value,
+  });
 }
 
 /** A condition, or undefined when it is absent or blank. */

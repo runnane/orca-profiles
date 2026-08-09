@@ -75,7 +75,9 @@ const acmeMachines = [
       printer_model: 'Acme Cube',
       printer_variant: '0.4',
       nozzle_diameter: '0.4',
-      printer_notes: 'ACME_CUBE_V1',
+      // Multi-line, as real `printer_notes` are. A `/.*ACME_CUBE.*/` condition
+      // only matches across these newlines because boost::regex lets `.` do so.
+      printer_notes: 'PRINTER_VENDOR_ACME\nPRINTER_MODEL_CUBE\nACME_CUBE_V1',
       default_print_profile: '0.20mm Standard @Acme',
       default_filament_profile: ['Acme PLA @System'],
     },
