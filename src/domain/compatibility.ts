@@ -115,6 +115,24 @@ export interface PrinterCompatibility {
   processes: Compatibility[];
 }
 
+/**
+ * Is this preset one the slicer would actually offer, or only an inheritance
+ * source?
+ *
+ * A vendor-bundle preset marked `instantiation: "false"` is **never added to the
+ * collection at all**: it is stored as a config map for others to inherit and the
+ * loader returns before the preset is constructed (PresetBundle.cpp:4929-4941).
+ * So `fdm_filament_common` cannot be selected for any printer, and listing it as
+ * "available" would be describing something that is not there.
+ *
+ * The `Template` vendor is the documented exception — the guard is
+ * `instantiation == "false" && "Template" != vendor_name` — so its
+ * non-instantiable presets *are* loaded and stay in the list.
+ */
+function isSelectable(p: Preset): boolean {
+  return p.raw.instantiation !== 'false' || p.vendor === 'Template';
+}
+
 export interface CompatibilityOptions {
   /**
    * Scope a filament verdict to a process as well, which is the only honest way
@@ -209,7 +227,8 @@ export function compatibilityFor(
   };
 
   const wanted = (p: Preset) =>
-    opts.includeNeverLoaded ? p.scope !== 'snapshot' : p.scope === 'active' && !dead.has(p.id);
+    isSelectable(p) &&
+    (opts.includeNeverLoaded ? p.scope !== 'snapshot' : p.scope === 'active' && !dead.has(p.id));
 
   const byName = (a: Compatibility, b: Compatibility) =>
     a.preset.name.localeCompare(b.preset.name, 'en');

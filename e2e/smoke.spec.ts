@@ -41,6 +41,32 @@ test('loads a config and walks every tab without console errors', async ({ page 
   await page.keyboard.press('Enter');
   await expect(page.locator('main h2').first()).toBeVisible();
 
+  await page.getByRole('tab', { name: 'Printer' }).click();
+  // Picking a printer is the whole interaction; before that the view should say so
+  // rather than render two empty lists.
+  await expect(page.getByText('Pick a printer.')).toBeVisible();
+  await page.getByLabel('Printer', { exact: true }).selectOption({ label: 'Workshop Cube · user' });
+  await expect(page.getByRole('heading', { name: /Filaments/ })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/7-printer.png`, fullPage: true });
+  // `undetermined` has to be its own state on screen, not a boolean with a caveat.
+  await expect(page.locator('.compat-row.undetermined').first()).toBeVisible();
+  await expect(page.locator('.compat-row.excluded').first()).toBeVisible();
+  await expect(page.locator('.compat-row.available').first()).toBeVisible();
+  // The two answers nobody would guess, and the reason this view exists: a
+  // condition we will not pretend to have evaluated, and a filament available only
+  // because the printer inherits from a preset it names.
+  await page.getByRole('button', { name: 'undetermined', exact: true }).click();
+  await page.screenshot({ path: `${SHOTS}/8-printer-undetermined.png` });
+  await expect(page.locator('.compat-expr').first()).toBeVisible();
+  await page.getByRole('button', { name: 'all', exact: true }).click();
+  // The sentence that stops a bug report being filed: available *because the
+  // printer inherits from* a preset the filament names.
+  await expect(page.getByText(/which Workshop Cube inherits from/).first()).toBeVisible();
+
+  // A row opens the preset it names.
+  await page.locator('.compat-row').first().click();
+  await expect(page.locator('main h2').first()).toBeVisible();
+
   await page.getByRole('tab', { name: 'Presets' }).click();
   // A name the generated fixture actually has, and the one this screenshot is
   // named after: `Fast Draft` is the detached full copy, claimed by two files.

@@ -394,3 +394,56 @@ td.src { width: 26%; font-size: 11px; color: var(--ink-muted); }
 .graph-legend .swatch.user { background: var(--own); }
 .graph-legend .swatch.danger { background: var(--danger); }
 .graph-legend .swatch.warn { background: var(--warn); }
+
+/* printer view — one row per preset, with the reason it is or is not offered.
+   Verdict is a reserved status colour AND the word; see PrinterView.tsx. */
+.compat-list { display: flex; flex-direction: column; gap: 5px; }
+.compat-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: stretch;
+  text-align: left;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  cursor: pointer;
+}
+.compat-row:hover { background: var(--surface-raised); }
+.compat-row.available { border-left-color: var(--ok); }
+.compat-row.excluded { border-left-color: var(--danger); }
+.compat-row.undetermined { border-left-color: var(--warn); }
+.compat-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.compat-head .cname { font-weight: 600; }
+.compat-why { color: var(--ink-muted); }
+.compat-expr {
+  color: var(--ink);
+  background: var(--surface-sunken);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+  align-self: flex-start;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.compat-gate { color: var(--ink-faint); font-size: 11px; }
+.verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  min-width: 92px;
+}
+.verdict .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.verdict.available { color: var(--ok); }
+.verdict.available .dot { background: var(--ok); }
+.verdict.excluded { color: var(--danger); }
+.verdict.excluded .dot { background: var(--danger); }
+.verdict.undetermined { color: var(--warn); }
+.verdict.undetermined .dot { background: var(--warn); }
