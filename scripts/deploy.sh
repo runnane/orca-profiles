@@ -22,9 +22,18 @@ REMOTE_DIR="${ORCA_REMOTE_DIR:-/home/jon/apps/orca-profiles}"
 CONFIG_DIR="${ORCA_CONFIG:?set ORCA_CONFIG to the OrcaSlicer config path on \$ORCA_HOST}"
 BIND="${ORCA_BIND:-127.0.0.1}"
 PORT="${ORCA_PORT:-8099}"
-# Where to reach it *from here* for verification. The bind address unless it is
-# loopback, which would only ever answer on the target itself.
-VERIFY_URL="${ORCA_VERIFY_URL:-http://${BIND}:${PORT}}"
+# Where to reach it *from here* for verification. A bind address is not always a
+# usable URL: 0.0.0.0 means "every interface" and resolves to nothing, and
+# 127.0.0.1 would only ever answer on the target itself. In both cases ask the
+# target for the address on its default route.
+if [ -n "${ORCA_VERIFY_URL:-}" ]; then
+  VERIFY_URL="$ORCA_VERIFY_URL"
+elif [ "$BIND" = "0.0.0.0" ] || [ "$BIND" = "::" ] || [ "$BIND" = "127.0.0.1" ]; then
+  TARGET_IP="$(ssh "$HOST" "ip -4 route get 1.1.1.1 | awk '{print \$7; exit}'")"
+  VERIFY_URL="http://${TARGET_IP}:${PORT}"
+else
+  VERIFY_URL="http://${BIND}:${PORT}"
+fi
 
 SKIP_GATES=0
 [ "${1:-}" = "--skip-gates" ] && SKIP_GATES=1

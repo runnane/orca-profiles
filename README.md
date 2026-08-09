@@ -216,14 +216,19 @@ The container mounts the config `:ro` and publishes on **loopback by default**.
 `ORCA_BIND` widens that:
 
 ```bash
-ORCA_BIND=127.0.0.1    docker compose up -d   # default: this machine only
-ORCA_BIND=192.0.2.10 docker compose up -d   # a specific LAN address
-ORCA_BIND=100.64.0.2  docker compose up -d   # a tailnet address
-ORCA_BIND=0.0.0.0      docker compose up -d   # every interface, bridges included
+ORCA_BIND=127.0.0.1  docker compose up -d   # default: that machine only
+ORCA_BIND=192.0.2.10 docker compose up -d   # one specific interface
+ORCA_BIND=100.64.0.2 docker compose up -d   # a tailnet address
+ORCA_BIND=0.0.0.0    docker compose up -d   # every interface
 ```
 
-Prefer naming the interface over `0.0.0.0`: on a docker host the latter also
-publishes onto every bridge network, which is a wider surface than intended.
+`0.0.0.0` on a docker host means *every* interface — LAN, tailnet, and each
+container bridge network. That is the widest setting; name a single interface
+instead if you only meant one of them.
+
+`pnpm deploy` verifies over a real address either way: `0.0.0.0` and `127.0.0.1`
+are not reachable URLs from another machine, so the script asks the target for
+the address on its default route and checks that.
 
 **There is no authentication.** Credentials are stripped server-side, so a
 listener cannot lift a printer API key, password, pairing code or LAN address
