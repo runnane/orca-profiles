@@ -109,7 +109,7 @@ Three levels, cheapest first.
 **1. Automated — no browser needed.**
 
 ```bash
-pnpm test     # 42 unit tests against fixtures/config
+pnpm test     # generates the fixture, then runs the unit suite
 pnpm gates    # typecheck + lint + tests + build
 pnpm smoke    # playwright: builds, serves, walks every tab, fails on console errors
 ```
@@ -248,8 +248,11 @@ proves nothing, since loopback answers either way.
 | `src/domain/` | Pure logic: index, resolve, diff, analyze, normalize, redact |
 | `src/source/` | File System Access reader |
 | `src/ui/` | React views |
-| `fixtures/config/` | A **sanitised** real config — credentials stripped, account UUID removed |
+| `scripts/make-fixture.mjs` | Generates `fixtures/` — synthetic, gitignored, never a real config |
 | `e2e/` | Playwright smoke test |
 
-Tests run against `fixtures/config`, not synthetic data: the behaviour worth
-pinning down is exactly the mess a real config accumulates.
+Tests run against a **generated** config. The shapes are the ones real installs
+accumulate — detached copies, redundant overrides, two files claiming one name,
+an inactive profile, sync snapshots, credentials that are actually set — but
+every name in it is invented. `fixtures/` is gitignored and rebuilt by
+`pnpm test`, so a real config cannot end up committed to a public repo.
