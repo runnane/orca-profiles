@@ -5,15 +5,22 @@ slicer itself will not: **which of these values did I actually change**, **why i
 this file 359 keys long**, and **which of these presets does OrcaSlicer even
 load**.
 
-Static Vite SPA. No backend, no upload — it reads your config folder in the
-browser via the File System Access API, so printer-host credentials never leave
-the machine.
+Runs two ways:
+
+- **Container (recommended).** Mount the config read-only; the server reads it
+  and the SPA loads with no folder picker, in any browser, from any machine.
+- **Static SPA.** Reads the folder in the browser via the File System Access
+  API. Chromium-only, and needs a desktop session on the machine holding the
+  config — which is why the container exists.
 
 ```bash
+docker compose up --build              # http://localhost:8099
+ORCA_CONFIG=~/.config/OrcaSlicer docker compose up --build
+
 pnpm install
-pnpm dev        # http://localhost:5173
+pnpm dev        # http://localhost:5173, static mode
 pnpm gates      # typecheck + lint + tests + build
-pnpm smoke      # optional: playwright walk of the built app
+pnpm report DIR # the same analysis in a terminal
 ```
 
 ## Why presets are hard to read
@@ -120,18 +127,22 @@ ssh host 'node /tmp/report.mjs "~/.config/OrcaSlicer"'
 It prints no setting values — credentials are reported as a count of presets
 that have one set, never as a value — so the output is safe to paste.
 
-**3. In the browser, with the folder picker.** The File System Access API needs
-a **secure context**, so `http://<lan-ip>:5173` will silently offer no picker.
-Serve it on the machine that holds the config and open it at `localhost`:
+**3. In a browser, against a real config.** Run the container on the machine
+that holds the config:
 
 ```bash
-pnpm dev                                  # localhost:5173, click "Load sample config"
-# or, on the printer host, with just python:
-python3 -m http.server 8080 -d /path/to/dist   # then open http://localhost:8080
+docker compose up --build      # or: pnpm docker:build && pnpm docker:run
+pnpm test:server               # playwright check that it auto-loads
+ORCA_URL=http://localhost:8100 pnpm test:server   # ...through a tunnel
 ```
 
-Use Chrome or Edge — Firefox and Safari have no directory picker, and the app
-says so and falls back to the bundled sample.
+Then open `http://localhost:8099` — from that machine, or through
+`ssh -L 8099:localhost:8099 host` from anywhere. Any browser works; there is no
+picker and no Chromium requirement.
+
+The static mode still exists (`pnpm dev`) but the File System Access API needs a
+**secure context**, so `http://<lan-ip>:5173` will silently offer no picker, and
+only Chromium browsers have one at all.
 
 ## What it flags
 
@@ -145,7 +156,24 @@ Machine presets carry `printhost_apikey`, `printhost_password`, `print_host` and
 a device serial as ordinary keys in the same flat JSON as layer height. They are
 masked by **key name** wherever a value would be shown, so a credential this app
 has never seen is still covered. Whether one is *set* is reported; the value
-never is. See [`src/domain/redact.ts`](src/domain/redact.ts).
+never is.
+
+**In container mode this is load-bearing rather than cosmetic**, because the
+config genuinely crosses a network boundary. The server strips credentials
+before serialising, so they never reach the browser at all — see
+[`src/domain/redact.ts`](src/domain/redact.ts).
+
+`OrcaSlicer.conf` gets an **allowlist**, not a key denylist, and the reason is
+worth keeping: the real file holds `access_code`, `user_access_code`, `dev_sn`,
+and a `local_machines` map **keyed by printer IP address** with device hostnames
+inside. A key that is itself the secret cannot be scrubbed by blanking values.
+The app needs exactly one field from that file — which user profile is live — so
+that is the only field served. This was found by diffing a real config against
+what the API returned; a fixture with blank credentials had reported it clean.
+
+The container publishes on **loopback only** and mounts the config `:ro`. To
+reach it from elsewhere, tunnel (`ssh -L 8099:localhost:8099 host`) rather than
+binding it to `0.0.0.0`.
 
 ## Layout
 

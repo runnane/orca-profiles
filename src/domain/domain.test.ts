@@ -10,7 +10,7 @@ import { diffEffective, diffRaw } from './diff';
 import { buildIndex, loadOrder, lookupParent, type ConfigIndex } from './index-config';
 import { loadConfigDir } from './load-fixtures';
 import { parseQuotedList, scalarAsList, valuesEqual } from './normalize';
-import { isSensitiveKey, maskValue } from './redact';
+import { isSensitiveKey, maskValue, redactConfJson, redactPresetJson, REDACTED } from './redact';
 import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
 
 const index: ConfigIndex = buildIndex(loadConfigDir(new URL('../../fixtures/config', import.meta.url).pathname));
@@ -390,5 +390,91 @@ describe('dead files', () => {
     const detached = findings.filter((f) => f.kind === 'detached');
     const titles = detached.map((f) => f.title);
     expect(new Set(titles).size).toBe(titles.length);
+  });
+});
+
+describe('transport redaction', () => {
+  it('replaces a set credential with the sentinel and never the value', () => {
+    // The failing direction: this input HAS credentials. The fixture does not,
+    // so a test against fixture data would pass without the redactor running.
+    const raw = JSON.stringify({
+      name: 'my printer',
+      printhost_apikey: 'super-secret-key',
+      printhost_password: 'hunter2',
+      print_host: ['192.168.1.50', ''],
+      nozzle_temperature: '250',
+    });
+    const out = redactPresetJson(raw);
+    expect(out).not.toContain('super-secret-key');
+    expect(out).not.toContain('hunter2');
+    expect(out).not.toContain('192.168.1.50');
+
+    const parsed = JSON.parse(out) as Record<string, unknown>;
+    expect(parsed.printhost_apikey).toBe(REDACTED);
+    expect(parsed.printhost_password).toBe(REDACTED);
+    // Set-ness survives per element, so "one host configured" is still visible.
+    expect(parsed.print_host).toEqual([REDACTED, '']);
+    // Print settings are untouched.
+    expect(parsed.nozzle_temperature).toBe('250');
+    expect(parsed.name).toBe('my printer');
+  });
+
+  it('leaves an unset credential empty so the UI can say "not set"', () => {
+    const out = JSON.parse(redactPresetJson(JSON.stringify({ printhost_apikey: '' })));
+    expect(out.printhost_apikey).toBe('');
+  });
+
+  it('keeps the redacted value readable as "set" by the UI', () => {
+    expect(maskValue(REDACTED)).toBe('•••••• (set, hidden)');
+    expect(maskValue('')).toBe('(not set)');
+  });
+
+  it('scrubs a sensitive subtree at any depth, not just top-level keys', () => {
+    // Presets are flat, but this ran over OrcaSlicer.conf too and only checked
+    // top-level keys — which is how a real printer IP reached the browser.
+    const raw = JSON.stringify({
+      app: { preset_folder: '', printhost_apikey: 'nested-secret' },
+      outer: { inner: { printhost_password: 'deep' } },
+    });
+    const out = redactPresetJson(raw);
+    expect(out).not.toContain('nested-secret');
+    expect(out).not.toContain('deep');
+  });
+
+  it('drops a sensitive subtree whose KEYS are the secret', () => {
+    // `local_machines` is keyed by printer IP. Blanking values leaves the
+    // addresses in the key positions, so the whole subtree has to go.
+    const raw = JSON.stringify({
+      local_machines: { '172.20.100.236': { dev_ip: '172.20.100.236', dev_name: 'printer' } },
+    });
+    const out = redactPresetJson(raw);
+    expect(out).not.toContain('172.20.100.236');
+    expect(out).not.toContain('printer');
+    expect(JSON.parse(out).local_machines).toEqual({});
+  });
+
+  it('reduces OrcaSlicer.conf to the one field the app needs', () => {
+    const raw = JSON.stringify({
+      app: { preset_folder: 'cloud-abc', other_setting: 'kept out' },
+      access_code: { printer1: 'pairing-code' },
+      user_access_code: 'secret',
+      dev_sn: { a: 'SERIAL123' },
+      local_machines: { '10.0.0.5': { dev_name: 'ender' } },
+    });
+    const out = redactConfJson(raw);
+    expect(JSON.parse(out)).toEqual({ app: { preset_folder: 'cloud-abc' } });
+    for (const leak of ['pairing-code', 'SERIAL123', '10.0.0.5', 'ender', 'secret', 'kept out']) {
+      expect(out).not.toContain(leak);
+    }
+  });
+
+  it('still yields a usable conf when it cannot be parsed', () => {
+    expect(JSON.parse(redactConfJson('{broken'))).toEqual({ app: { preset_folder: '' } });
+  });
+
+  it('refuses to pass through a file it cannot parse', () => {
+    // An unparseable file might contain anything; forwarding it verbatim would
+    // route around the key-name check entirely.
+    expect(redactPresetJson('{"printhost_apikey": "leak"')).toBe('{}');
   });
 });

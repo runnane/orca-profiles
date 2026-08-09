@@ -1,0 +1,19 @@
+services:
+  orca-profiles:
+    build: .
+    image: orca-profiles:latest
+    # Published on loopback only. Point a browser at http://localhost:8099, or
+    # tunnel it (`ssh -L 8099:localhost:8099 <host>`) to reach it from a laptop.
+    # To share it on a tailnet, replace with "<tailscale-ip>:8099:8099" — never
+    # bind a printer config to 0.0.0.0 on an untrusted network.
+    ports:
+      - "127.0.0.1:8099:8099"
+    volumes:
+      # The OrcaSlicer config. Read-only: this app never writes to it.
+      - ${ORCA_CONFIG:-~/.config/OrcaSlicer}:/config:ro
+    environment:
+      ORCA_CONFIG_DIR: /config
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true

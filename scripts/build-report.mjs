@@ -2,14 +2,16 @@
  * Bundles the terminal report into one dependency-free ESM file, so it can be
  * copied to a printer host and run with nothing but node.
  */
-import { build } from 'esbuild';
+import { build } from 'vite';
 
 await build({
-  entryPoints: ['src/cli/report.ts'],
-  outfile: 'dist-cli/report.mjs',
-  bundle: true,
-  platform: 'node',
-  target: 'node20',
-  format: 'esm',
-  logLevel: 'warning',
+  logLevel: 'warn',
+  build: {
+    ssr: 'src/cli/report.ts',
+    outDir: 'dist-cli',
+    emptyOutDir: true,
+    target: 'node20',
+    minify: false,
+    rollupOptions: { output: { entryFileNames: 'report.mjs' } },
+  },
 });

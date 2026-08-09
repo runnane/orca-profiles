@@ -1,0 +1,9 @@
+node_modules
+dist
+dist-cli
+dist-server
+.git
+e2e/screenshots
+test-results
+playwright-report
+public/sample-config.json

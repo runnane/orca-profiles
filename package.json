@@ -1,6 +1,7 @@
 {
   "name": "orca-profiles",
   "private": true,
+  "packageManager": "pnpm@10.33.3",
   "version": "0.0.0",
   "type": "module",
   "scripts": {
@@ -13,7 +14,10 @@
     "test": "vitest run",
     "gates": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
     "smoke": "playwright test",
-    "report": "node scripts/build-report.mjs && node dist-cli/report.mjs"
+    "report": "node scripts/build-report.mjs && node dist-cli/report.mjs",
+    "docker:build": "docker build -t orca-profiles:latest .",
+    "docker:run": "docker run --rm -p 127.0.0.1:8099:8099 -v \"${ORCA_CONFIG:-$HOME/.config/OrcaSlicer}:/config:ro\" --read-only --security-opt no-new-privileges:true orca-profiles:latest",
+    "test:server": "playwright test e2e/server.spec.ts"
   },
   "dependencies": {
     "react": "^19.2.8",
@@ -26,11 +30,15 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
     "@vitest/coverage-v8": "^4.1.10",
-    "esbuild": "^0.28.2",
     "oxlint": "^1.75.0",
     "typescript": "~6.0.2",
     "vite": "^8.2.0",
     "vitest": "^4.1.10"
   },
-  "description": "Read-only explorer for OrcaSlicer preset inheritance"
+  "description": "Read-only explorer for OrcaSlicer preset inheritance",
+  "pnpm": {
+    "overrides": {
+      "esbuild": "0.28.1"
+    }
+  }
 }

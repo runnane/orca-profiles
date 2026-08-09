@@ -11,3 +11,4 @@ playwright-report
 .claude/
 .mcp.json
 dist-cli
+dist-server

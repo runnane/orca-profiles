@@ -10,6 +10,7 @@ import { stats } from '../domain/analyze';
 import { buildIndex, type ConfigFile, type ConfigIndex } from '../domain/index-config';
 import type { Preset, PresetKind, PresetOrigin } from '../domain/types';
 import { isFileSystemAccessSupported, pickAndReadConfig } from '../source/fs-access';
+import { fetchServerConfig, serverConfigAvailable } from '../source/http';
 import { CompareView } from './CompareView';
 import { HealthReport } from './HealthReport';
 import { PresetDetail } from './PresetDetail';
@@ -37,25 +38,40 @@ export function App() {
   // when you go looking but never pad the counts.
   const [showInactive, setShowInactive] = useState(false);
 
-  const load = useCallback((files: ConfigFile[], name: string) => {
+  // How long the last load took, so "is it slow?" has an answer on screen
+  // rather than being a matter of opinion.
+  const [timing, setTiming] = useState<{ files: number; readMs: number; indexMs: number } | null>(
+    null,
+  );
+
+  const load = useCallback((files: ConfigFile[], name: string, readMs: number) => {
+    const t0 = performance.now();
     const built = buildIndex(files);
+    const indexMs = performance.now() - t0;
     setIndex(built);
     setRootName(name);
+    setTiming({ files: files.length, readMs, indexMs });
     setSelectedId('');
     setTab('presets');
   }, []);
 
   const openPicker = useCallback(async () => {
     setError(null);
-    setLoading('Reading config…');
+    // The dialog is modal and can sit open for as long as the user likes, so
+    // this must not claim to be reading anything yet.
+    setLoading('Waiting for you to choose a folder…');
     try {
-      const { rootName: name, files } = await pickAndReadConfig((p) =>
-        setLoading(`Reading… ${p.files} files`),
+      const { rootName: name, files, elapsedMs } = await pickAndReadConfig(
+        (p) => {
+          if (p.phase === 'scanning') setLoading(`Scanning… ${p.files} files found`);
+          else setLoading(`Reading ${p.files}/${p.total ?? '?'} files…`);
+        },
+        () => setLoading('Scanning…'),
       );
       if (files.length === 0) {
         setError('No preset files found there. Pick the OrcaSlicer config folder itself.');
       } else {
-        load(files, name);
+        load(files, name, elapsedMs);
       }
     } catch (e) {
       const err = e as Error;
@@ -65,14 +81,47 @@ export function App() {
     }
   }, [load]);
 
+  // Served by the container: the config is already on the server side, so load
+  // it without asking. No picker, no Chromium requirement.
+  const [serverMode, setServerMode] = useState<boolean | null>(null);
+  const loadFromServer = useCallback(
+    async (refresh = false) => {
+      setError(null);
+      setLoading('Loading config from server…');
+      try {
+        const data = await fetchServerConfig(refresh);
+        load(data.files, data.rootName, data.readMs);
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setLoading(null);
+      }
+    },
+    [load],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const available = await serverConfigAvailable();
+      if (cancelled) return;
+      setServerMode(available);
+      if (available) void loadFromServer();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadFromServer]);
+
   const loadSample = useCallback(async () => {
     setError(null);
     setLoading('Loading sample…');
+    const t0 = performance.now();
     try {
       const res = await fetch(`${import.meta.env.BASE_URL}sample-config.json`);
       if (!res.ok) throw new Error(`Sample config not available (${res.status})`);
       const data = (await res.json()) as { rootName: string; files: ConfigFile[] };
-      load(data.files, data.rootName);
+      load(data.files, data.rootName, performance.now() - t0);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -120,6 +169,18 @@ export function App() {
         <div className="empty">
           <div className="inner">
             <h2 style={{ margin: 0, fontSize: 18 }}>Open an OrcaSlicer config</h2>
+            {serverMode === null && <p className="muted" style={{ margin: 0 }}>Looking for a config server…</p>}
+            {serverMode === true ? (
+              <>
+                <p className="muted" style={{ margin: 0 }}>
+                  {loading ?? 'Reading the config mounted into this container.'}
+                </p>
+                <button type="button" onClick={() => void loadFromServer(true)} disabled={!!loading}>
+                  Retry
+                </button>
+              </>
+            ) : (
+              <>
             <p className="muted" style={{ margin: 0 }}>
               Point at your OrcaSlicer configuration folder. Everything is read in this browser —
               nothing is uploaded, and printer credentials are never displayed.
@@ -145,6 +206,8 @@ export function App() {
             <p className="faint mono" style={{ margin: 0, fontSize: 11 }}>
               ~/.config/OrcaSlicer · or the AppImage's <code>.config</code> folder
             </p>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -184,9 +247,15 @@ export function App() {
           </button>
         </div>
         <span className="spacer" />
-        <button type="button" className="ghost" onClick={openPicker}>
-          Open another…
-        </button>
+        {serverMode ? (
+          <button type="button" className="ghost" onClick={() => void loadFromServer(true)}>
+            Reload from disk
+          </button>
+        ) : (
+          <button type="button" className="ghost" onClick={openPicker}>
+            Open another…
+          </button>
+        )}
       </Topbar>
 
       <div className="body">
@@ -266,7 +335,7 @@ export function App() {
                 onCompare={showCompare}
               />
             ) : (
-              <Overview index={index} onOpenHealth={() => setTab('health')} />
+              <Overview index={index} onOpenHealth={() => setTab('health')} timing={timing} />
             ))}
 
           {tab === 'health' && (
@@ -336,7 +405,15 @@ function PresetRow({
   );
 }
 
-function Overview({ index, onOpenHealth }: { index: ConfigIndex; onOpenHealth: () => void }) {
+function Overview({
+  index,
+  onOpenHealth,
+  timing,
+}: {
+  index: ConfigIndex;
+  onOpenHealth: () => void;
+  timing: { files: number; readMs: number; indexMs: number } | null;
+}) {
   const s = stats(index);
   return (
     <div>
@@ -365,6 +442,13 @@ function Overview({ index, onOpenHealth }: { index: ConfigIndex; onOpenHealth: (
           </div>
         )}
       </div>
+
+      {timing && (
+        <p className="faint mono" style={{ marginTop: -8, fontSize: 11 }}>
+          read {timing.files} files in {(timing.readMs / 1000).toFixed(1)}s · indexed in{' '}
+          {timing.indexMs.toFixed(0)}ms
+        </p>
+      )}
 
       <div className="notice">
         A preset stores only what it <strong>overrides</strong>; everything else comes from the
