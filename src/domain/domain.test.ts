@@ -372,3 +372,23 @@ describe('active profile is read from OrcaSlicer.conf', () => {
     ).toBe('default');
   });
 });
+
+describe('dead files', () => {
+  const findings = analyze(index);
+
+  it('reports a shadowed file once, and not as a separate problem', () => {
+    // `ABS fast2.json` loses the name clash and is never loaded. It is also a
+    // detached 352-key copy — but saying so invites fixing a file the slicer
+    // has never read, so only the "never loaded" finding should mention it.
+    const dead = 'user/default/process/ABS fast2.json';
+    const mentions = findings.filter((f) => f.presetIds.includes(dead));
+    expect(mentions.length).toBe(1);
+    expect(mentions[0].kind).toBe('duplicate-name');
+  });
+
+  it('disambiguates titles when a name is claimed more than once', () => {
+    const detached = findings.filter((f) => f.kind === 'detached');
+    const titles = detached.map((f) => f.title);
+    expect(new Set(titles).size).toBe(titles.length);
+  });
+});

@@ -16,5 +16,5 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src/**/*.test.ts", "src/domain/load-fixtures.ts"]
+  "include": ["src/**/*.test.ts", "src/domain/load-fixtures.ts", "src/cli/**/*", "e2e/**/*", "playwright.config.ts"]
 }

@@ -95,6 +95,44 @@ than folding them into "same" — and deliberately never coerces a scalar into a
 vector unless the other side is one, because hiding a real difference is the
 worse failure.
 
+## Testing it
+
+Three levels, cheapest first.
+
+**1. Automated — no browser needed.**
+
+```bash
+pnpm test     # 42 unit tests against fixtures/config
+pnpm gates    # typecheck + lint + tests + build
+pnpm smoke    # playwright: builds, serves, walks every tab, fails on console errors
+```
+
+**2. Against a real config, in a terminal.** The interesting config usually lives
+on the printer host, which has no desktop:
+
+```bash
+pnpm report /path/to/OrcaSlicer          # locally
+# or copy the single bundled file to the machine that has the config:
+node scripts/build-report.mjs && scp dist-cli/report.mjs host:/tmp/
+ssh host 'node /tmp/report.mjs "~/.config/OrcaSlicer"'
+```
+
+It prints no setting values — credentials are reported as a count of presets
+that have one set, never as a value — so the output is safe to paste.
+
+**3. In the browser, with the folder picker.** The File System Access API needs
+a **secure context**, so `http://<lan-ip>:5173` will silently offer no picker.
+Serve it on the machine that holds the config and open it at `localhost`:
+
+```bash
+pnpm dev                                  # localhost:5173, click "Load sample config"
+# or, on the printer host, with just python:
+python3 -m http.server 8080 -d /path/to/dist   # then open http://localhost:8080
+```
+
+Use Chrome or Edge — Firefox and Safari have no directory picker, and the app
+says so and falls back to the bundled sample.
+
 ## What it flags
 
 `detached` · `duplicate-name` (files never loaded) · `redundant-overrides` ·

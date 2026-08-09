@@ -10,3 +10,4 @@ playwright-report
 # and .mcp.json names internal infrastructure.
 .claude/
 .mcp.json
+dist-cli

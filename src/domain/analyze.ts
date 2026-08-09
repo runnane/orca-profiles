@@ -77,7 +77,31 @@ export function analyze(index: ConfigIndex): Finding[] {
     });
   }
 
+  // Files that lose a name clash are never loaded, so every other observation
+  // about them is moot — reporting a dead file as "a detached copy" invites
+  // someone to go and fix a file the slicer has never read.
+  const shadowed = new Set<string>();
+  {
+    const groups = new Map<string, Preset[]>();
+    for (const p of index.active) {
+      const k = `${p.origin}:${p.profile ?? p.vendor ?? ''}:${p.kind}:${p.name}`;
+      groups.set(k, [...(groups.get(k) ?? []), p]);
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      for (const loser of loadOrder(group).slice(1)) shadowed.add(loser.id);
+    }
+  }
+
+  // When a name is claimed more than once, a title using only the name is
+  // ambiguous — say which file it is.
+  const nameCount = new Map<string, number>();
+  for (const p of index.active) nameCount.set(p.name, (nameCount.get(p.name) ?? 0) + 1);
+  const label = (p: Preset) =>
+    (nameCount.get(p.name) ?? 0) > 1 ? `${p.name} (${p.path.split('/').pop()})` : p.name;
+
   for (const p of userPresets) {
+    if (shadowed.has(p.id)) continue;
     const { missingParent, circular } = inheritanceChain(index, p);
     const count = settingCount(p);
 
@@ -86,7 +110,7 @@ export function analyze(index: ConfigIndex): Finding[] {
         id: `circular:${p.id}`,
         severity: 'high',
         kind: 'circular-inherits',
-        title: `${p.name} inherits in a loop`,
+        title: `${label(p)} inherits in a loop`,
         detail: 'Following `inherits` came back to a preset already in the chain, so resolution stopped early.',
         presetIds: [p.id],
         weight: 900,
@@ -98,7 +122,7 @@ export function analyze(index: ConfigIndex): Finding[] {
         id: `broken:${p.id}`,
         severity: 'high',
         kind: 'broken-parent',
-        title: `${p.name} inherits from a missing preset`,
+        title: `${label(p)} inherits from a missing preset`,
         detail: `It declares \`inherits: "${missingParent}"\`, but no preset by that name is installed. Every value that parent would have supplied is simply absent.`,
         presetIds: [p.id],
         weight: 800,
@@ -110,7 +134,7 @@ export function analyze(index: ConfigIndex): Finding[] {
         id: `detached:${p.id}`,
         severity: 'medium',
         kind: 'detached',
-        title: `${p.name} is a detached full copy (${count} settings)`,
+        title: `${label(p)} is a detached full copy (${count} settings)`,
         detail:
           'It has no parent, so it stores every setting itself. Vendor updates will never reach it, and there is no way to see which values you deliberately changed.',
         presetIds: [p.id],
@@ -125,7 +149,7 @@ export function analyze(index: ConfigIndex): Finding[] {
           id: `redundant:${p.id}`,
           severity: 'low',
           kind: 'redundant-overrides',
-          title: `${p.name} has ${redundant.length} override${redundant.length === 1 ? '' : 's'} that change nothing`,
+          title: `${label(p)} has ${redundant.length} override${redundant.length === 1 ? '' : 's'} that change nothing`,
           detail: `${redundant.length} of ${redundant.length + effective.length} overrides repeat the inherited value. Removing them would leave ${effective.length} real change${effective.length === 1 ? '' : 's'}.`,
           presetIds: [p.id],
           weight: redundant.length,
@@ -139,7 +163,7 @@ export function analyze(index: ConfigIndex): Finding[] {
     index.active.filter((p) => p.kind === 'machine').map((p) => p.name),
   );
   for (const p of userPresets) {
-    if (p.kind === 'machine') continue;
+    if (p.kind === 'machine' || shadowed.has(p.id)) continue;
     const cp = p.raw.compatible_printers;
     const list = Array.isArray(cp) ? cp : undefined;
     if (!list || list.length === 0) continue;
@@ -149,7 +173,7 @@ export function analyze(index: ConfigIndex): Finding[] {
         id: `orphan:${p.id}`,
         severity: 'medium',
         kind: 'orphaned-printer',
-        title: `${p.name} is limited to printers that no longer exist`,
+        title: `${label(p)} is limited to printers that no longer exist`,
         detail: `\`compatible_printers\` names ${missing.map((m) => `"${m}"`).join(', ')}, none of which is installed. The preset will not appear for any printer.`,
         presetIds: [p.id],
         weight: 500,
@@ -159,7 +183,7 @@ export function analyze(index: ConfigIndex): Finding[] {
         id: `orphan-partial:${p.id}`,
         severity: 'low',
         kind: 'orphaned-printer',
-        title: `${p.name} references ${missing.length} missing printer${missing.length === 1 ? '' : 's'}`,
+        title: `${label(p)} references ${missing.length} missing printer${missing.length === 1 ? '' : 's'}`,
         detail: `Not installed: ${missing.map((m) => `"${m}"`).join(', ')}.`,
         presetIds: [p.id],
         weight: 100,
@@ -197,7 +221,7 @@ export function analyze(index: ConfigIndex): Finding[] {
     });
   }
 
-  findings.push(...findNearDuplicates(index, userPresets));
+  findings.push(...findNearDuplicates(index, userPresets.filter((p) => !shadowed.has(p.id))));
 
   const sevRank: Record<FindingSeverity, number> = { high: 0, medium: 1, low: 2 };
   findings.sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || b.weight - a.weight);
