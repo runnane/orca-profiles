@@ -15,6 +15,15 @@
  *  - broken-parent `inherits` naming a preset that is not installed.
  *  - orphaned-printer  `compatible_printers` naming a machine that is gone, so
  *                  the preset silently never appears in the slicer.
+ *  - missing-reference  any of the *other* keys that name a preset —
+ *                  `compatible_prints`, `default_print_profile`,
+ *                  `default_filament_profile` — plus a vendor index entry whose
+ *                  file is not on disk and a system printer preset whose
+ *                  `printer_model` / `printer_variant` its own vendor does not
+ *                  declare. Each carries a `reason` saying *why* the name did
+ *                  not resolve, because "absent", "in a profile that is not
+ *                  loaded" and "a preset of the wrong type" need three
+ *                  different fixes. See `classifyReference`.
  *  - duplicate-name  two files claiming one name. The slicer loads the first and
  *                  **never loads the rest** — so a file can be edited forever
  *                  with no effect. Three files claim "ABS fast" here.
@@ -24,11 +33,33 @@
  */
 
 import { diffEffective } from './diff';
-import { loadOrder, tieIsArbitrary, type ConfigIndex } from './index-config';
+import {
+  classifyReference,
+  loadOrder,
+  tieIsArbitrary,
+  type ConfigIndex,
+  type ReferenceReason,
+} from './index-config';
+import { presetReferences } from './references';
 import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
-import type { Preset } from './types';
+import type { Preset, PresetKind } from './types';
 
 export type FindingSeverity = 'high' | 'medium' | 'low';
+
+/** One name that did not resolve, and why. */
+export interface UnresolvedReference {
+  name: string;
+  reason: ReferenceReason;
+  /** Where the thing with that name actually is, when there is one. */
+  targetPath?: string;
+}
+
+/** The reference a finding is about, for callers that need more than prose. */
+export interface FindingReference {
+  key: string;
+  targetKind?: PresetKind;
+  unresolved: UnresolvedReference[];
+}
 
 export interface Finding {
   id: string;
@@ -40,11 +71,20 @@ export interface Finding {
     | 'broken-parent'
     | 'circular-inherits'
     | 'orphaned-printer'
+    | 'missing-reference'
     | 'duplicate-name'
     | 'parse-error';
   title: string;
   detail: string;
   presetIds: string[];
+  /**
+   * Files a finding is about that are not presets — a vendor index, or the file
+   * a `sub_path` points at and does not find. A finding names presets or paths;
+   * one that names neither cannot be acted on.
+   */
+  paths?: string[];
+  /** Set on reference findings, so a caller can style by reason not by wording. */
+  reference?: FindingReference;
   /** Sort key within a severity — bigger is more worth looking at. */
   weight: number;
 }
@@ -118,13 +158,20 @@ export function analyze(index: ConfigIndex): Finding[] {
     }
 
     if (missingParent) {
+      const r = classifyReference(index, p, p.kind, missingParent);
+      const near = r.others[0];
       findings.push({
         id: `broken:${p.id}`,
         severity: 'high',
         kind: 'broken-parent',
         title: `${label(p)} inherits from a missing preset`,
-        detail: `It declares \`inherits: "${missingParent}"\`, but no preset by that name is installed. Every value that parent would have supplied is simply absent.`,
+        detail: `It declares \`inherits: "${missingParent}"\`, but ${reasonClause(missingParent, r.reason, near)}. Every value that parent would have supplied is simply absent.`,
         presetIds: [p.id],
+        reference: {
+          key: 'inherits',
+          targetKind: p.kind,
+          unresolved: [{ name: missingParent, reason: r.reason, targetPath: near?.path }],
+        },
         weight: 800,
       });
     }
@@ -158,38 +205,8 @@ export function analyze(index: ConfigIndex): Finding[] {
     }
   }
 
-  // Machines that exist, for the compatible_printers check.
-  const machineNames = new Set(
-    index.active.filter((p) => p.kind === 'machine').map((p) => p.name),
-  );
-  for (const p of userPresets) {
-    if (p.kind === 'machine' || shadowed.has(p.id)) continue;
-    const cp = p.raw.compatible_printers;
-    const list = Array.isArray(cp) ? cp : undefined;
-    if (!list || list.length === 0) continue;
-    const missing = list.filter((n) => n && !machineNames.has(n));
-    if (missing.length === list.length) {
-      findings.push({
-        id: `orphan:${p.id}`,
-        severity: 'medium',
-        kind: 'orphaned-printer',
-        title: `${label(p)} is limited to printers that no longer exist`,
-        detail: `\`compatible_printers\` names ${missing.map((m) => `"${m}"`).join(', ')}, none of which is installed. The preset will not appear for any printer.`,
-        presetIds: [p.id],
-        weight: 500,
-      });
-    } else if (missing.length > 0) {
-      findings.push({
-        id: `orphan-partial:${p.id}`,
-        severity: 'low',
-        kind: 'orphaned-printer',
-        title: `${label(p)} references ${missing.length} missing printer${missing.length === 1 ? '' : 's'}`,
-        detail: `Not installed: ${missing.map((m) => `"${m}"`).join(', ')}.`,
-        presetIds: [p.id],
-        weight: 100,
-      });
-    }
-  }
+  findings.push(...referenceFindings(index, userPresets, shadowed, label));
+  findings.push(...vendorIndexFindings(index));
 
   // Duplicate names within one profile. Across profiles is expected — the cloud
   // profile mirrors the local one — so only a clash inside a single profile is
@@ -231,6 +248,266 @@ export function analyze(index: ConfigIndex): Finding[] {
   const sevRank: Record<FindingSeverity, number> = { high: 0, medium: 1, low: 2 };
   findings.sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || b.weight - a.weight);
   return findings;
+}
+
+/**
+ * Why a set of names did not resolve, as a clause that can follow "and".
+ *
+ * The common case is several names failing the same way, and repeating one clause
+ * per name reads like a bug. Names are already quoted by the caller, so identical
+ * reasons collapse into one clause and a mixed set is attributed name by name.
+ */
+function reasonsClause(
+  index: ConfigIndex,
+  unresolved: UnresolvedReference[],
+): string {
+  const near = (u: UnresolvedReference) => (u.targetPath ? index.byId.get(u.targetPath) : undefined);
+  if (unresolved.every((u) => u.reason === 'absent')) {
+    return unresolved.length === 1 ? 'which is not installed' : 'none of which is installed';
+  }
+  const clauses = unresolved.map((u) => reasonClause(u.name, u.reason, near(u)));
+  return `but ${[...new Set(clauses)].join('; ')}`;
+}
+
+/**
+ * Why one name did not resolve, as a clause that can follow "but".
+ *
+ * Every branch says what to do about it, because the three failures need three
+ * different fixes and "not found" tells you which of them none of the time.
+ */
+function reasonClause(name: string, reason: ReferenceReason, near: Preset | undefined): string {
+  switch (reason) {
+    case 'unloaded-profile':
+      return `a preset named "${name}" does exist, at ${near?.path ?? 'another user folder'} — in \`user/${near?.profile ?? '?'}\`, which OrcaSlicer does not load. Only one user folder is ever loaded (PresetBundle.cpp:528), so that file can never satisfy this reference and editing it changes nothing`;
+    case 'wrong-kind':
+      return `the only preset named "${name}" is a ${near?.kind ?? 'different'} preset. A name is resolved inside a single \`PresetCollection\`, which holds one preset type (\`find_preset2\`, Preset.cpp:3229), so a ${near?.kind ?? 'different'} preset cannot answer this`;
+    case 'absent':
+      return `no preset by that name is installed`;
+    // A reference that resolves is not a finding; `shadowed` resolves too, and
+    // the clash it implies is already reported once as `duplicate-name`.
+    case 'resolved':
+    case 'shadowed':
+      return `it resolves`;
+  }
+}
+
+/** What breaks, per key, when one of its names does not resolve. */
+const CONSEQUENCE: Record<string, string> = {
+  compatible_prints:
+    'A filament is only offered for a process named in `compatible_prints` (`is_compatible_with_print`, Preset.cpp:771-791), so it will never be selectable with that one.',
+  default_print_profile:
+    'That is the process preset the slicer switches to when this printer is selected. When the name does not resolve it silently selects the first visible preset instead — no warning, no indication that your default was ignored (`select_preset_by_name`, Preset.cpp:3606-3613, called from PresetBundle.cpp:2143).',
+  default_filament_profile:
+    'That is the filament the slicer switches to when this printer is selected, and only the first entry is used (PresetBundle.cpp:2163-2166). When it does not resolve the slicer silently falls back to the first visible filament instead.',
+};
+
+/**
+ * Every reference other than `inherits`, checked in both serialisations.
+ *
+ * `compatible_printers` keeps its own finding kind — it is the one the UI already
+ * labels, and "limited to printers that no longer exist" is a sharper sentence
+ * than any generic wording. Everything else is `missing-reference`.
+ */
+function referenceFindings(
+  index: ConfigIndex,
+  presets: Preset[],
+  shadowed: Set<string>,
+  label: (p: Preset) => string,
+): Finding[] {
+  const out: Finding[] = [];
+
+  // A `compatible_printers` entry naming a preset that is not installed is still
+  // satisfied by any **user** printer that inherits that name: the slicer checks
+  // the active printer's `inherits` as well as its name
+  // (`is_compatible_with_parent_printer`, Preset.cpp:798-806, reached from
+  // Preset.cpp:840). Reporting those would be inventing a fault.
+  const inheritedByAMachine = new Set(
+    index.active
+      .filter((p) => p.kind === 'machine' && p.origin === 'user' && p.inherits)
+      .map((p) => p.inherits as string),
+  );
+
+  for (const p of presets) {
+    if (shadowed.has(p.id)) continue;
+
+    const groups = new Map<
+      string,
+      { targetKind: PresetKind; total: number; unresolved: UnresolvedReference[] }
+    >();
+    for (const ref of presetReferences(p)) {
+      if (ref.key === 'inherits') continue; // reported as `broken-parent`
+      const g = groups.get(ref.key) ?? { targetKind: ref.targetKind, total: 0, unresolved: [] };
+      g.total++;
+      groups.set(ref.key, g);
+      if (ref.key === 'compatible_printers' && inheritedByAMachine.has(ref.name)) continue;
+      const r = classifyReference(index, p, ref.targetKind, ref.name);
+      if (r.reason === 'resolved' || r.reason === 'shadowed') continue;
+      g.unresolved.push({ name: ref.name, reason: r.reason, targetPath: r.others[0]?.path });
+    }
+
+    for (const [key, g] of groups) {
+      if (g.unresolved.length === 0) continue;
+      const quoted = g.unresolved.map((u) => `"${u.name}"`).join(', ');
+      const why = reasonsClause(index, g.unresolved);
+      const all = g.unresolved.length === g.total;
+      const reference: FindingReference = { key, targetKind: g.targetKind, unresolved: g.unresolved };
+
+      if (key === 'compatible_printers') {
+        out.push(
+          all
+            ? {
+                id: `orphan:${p.id}`,
+                severity: 'medium',
+                kind: 'orphaned-printer',
+                title: `${label(p)} is limited to printers that no longer exist`,
+                detail: `\`compatible_printers\` names ${quoted}, ${why}. A non-empty \`compatible_printers\` excludes every printer it does not name (Preset.cpp:809-841), so this preset will not appear for any printer at all.`,
+                presetIds: [p.id],
+                reference,
+                weight: 500,
+              }
+            : {
+                id: `orphan-partial:${p.id}`,
+                severity: 'low',
+                kind: 'orphaned-printer',
+                title: `${label(p)} references ${g.unresolved.length} missing printer${g.unresolved.length === 1 ? '' : 's'}`,
+                detail: `Of the ${g.total} printers in \`compatible_printers\`, ${quoted} ${g.unresolved.length === 1 ? 'does' : 'do'} not resolve — ${why}. The preset still appears for the others.`,
+                presetIds: [p.id],
+                reference,
+                weight: 100,
+              },
+        );
+        continue;
+      }
+
+      out.push({
+        id: `ref:${key}:${p.id}`,
+        severity: all ? 'medium' : 'low',
+        kind: 'missing-reference',
+        title: `${label(p)} points \`${key}\` at ${g.unresolved.length === 1 ? 'a preset that does not resolve' : `${g.unresolved.length} presets that do not resolve`}`,
+        detail: `\`${key}\` names ${quoted}, ${why}. ${CONSEQUENCE[key] ?? ''}`.trim(),
+        presetIds: [p.id],
+        reference,
+        weight: all ? 400 : 90,
+      });
+    }
+  }
+
+  return out;
+}
+
+/**
+ * The vendor index as a promise the install has to keep.
+ *
+ * `system/<Vendor>.json` is the list the slicer loads from, so an entry whose
+ * `sub_path` is not on disk is not a stale note — that preset does not exist. Two
+ * findings come out of it, and the model one is the more serious:
+ *
+ *  - a preset entry with no file: that name is simply unavailable.
+ *  - a `machine_model_list` entry with no file: the model has no variants, so it
+ *    is never registered at all (PresetBundle.cpp:4819) — and **every** printer
+ *    preset naming it in `printer_model` is then rejected outright
+ *    (PresetBundle.cpp:4988).
+ *
+ * Also here: a system printer preset whose `printer_model` / `printer_variant`
+ * its own vendor does not declare. Vendor-scoped, and system-only — a user
+ * printer preset is checked against a `Custom` vendor synthesised from its own
+ * values (PresetBundle.cpp:2395-2416), which it cannot fail.
+ */
+function vendorIndexFindings(index: ConfigIndex): Finding[] {
+  const out: Finding[] = [];
+
+  for (const ref of index.vendorRefs) {
+    if (ref.present) continue;
+    const isModel = ref.list === 'machine_model_list';
+    out.push({
+      id: `vendor-missing:${ref.path}`,
+      severity: isModel ? 'high' : 'medium',
+      kind: 'missing-reference',
+      title: isModel
+        ? `${ref.vendor} declares printer model "${ref.name}" but its file is missing`
+        : `${ref.vendor} declares "${ref.name}" but its file is missing`,
+      detail: isModel
+        ? `\`system/${ref.vendor}.json\` lists this model with \`sub_path: "${ref.subPath}"\`, and there is no file at ${ref.path}. A model with no variants is never registered (PresetBundle.cpp:4819), so every printer preset whose \`printer_model\` is "${ref.name}" is rejected on load — "defines invalid printer model … it will be ignored" (PresetBundle.cpp:4988).`
+        : `\`system/${ref.vendor}.json\` lists this preset in \`${ref.list}\` with \`sub_path: "${ref.subPath}"\`, and there is no file at ${ref.path}. The name appears in the vendor's index and nowhere else, so anything inheriting from it or naming it has nothing to resolve to.`,
+      presetIds: [],
+      paths: [`system/${ref.vendor}.json`, ref.path],
+      reference: {
+        key: ref.list,
+        unresolved: [{ name: ref.name, reason: 'absent' }],
+      },
+      weight: isModel ? 880 : 450,
+    });
+  }
+
+  const modelsByVendor = new Map<string, Map<string, string[]>>();
+  for (const m of index.vendorModels) {
+    const byId = modelsByVendor.get(m.vendor) ?? new Map<string, string[]>();
+    byId.set(m.id, m.variants);
+    modelsByVendor.set(m.vendor, byId);
+  }
+
+  for (const p of index.presets) {
+    if (p.origin !== 'system' || p.kind !== 'machine' || !p.vendor) continue;
+    // A preset marked `instantiation: "false"` is a base for others to inherit,
+    // not a printer you can select. It is stored and returned before the model
+    // check ever runs (PresetBundle.cpp:4928), so `fdm_machine_common` having no
+    // `printer_model` is correct rather than broken.
+    if (p.raw.instantiation === 'false') continue;
+    const declared = modelsByVendor.get(p.vendor);
+    // A vendor with no `machine_model_list` at all is a different (and much
+    // louder) problem than one model missing; do not report every preset twice.
+    if (!declared || declared.size === 0) continue;
+    const model = typeof p.raw.printer_model === 'string' ? p.raw.printer_model : '';
+    const variant = typeof p.raw.printer_variant === 'string' ? p.raw.printer_variant : '';
+
+    if (model === '' || !declared.has(model)) {
+      out.push({
+        id: `printer-model:${p.id}`,
+        severity: 'high',
+        kind: 'missing-reference',
+        title:
+          model === ''
+            ? `${p.name} declares no printer_model, so it is never loaded`
+            : `${p.name} names a printer model ${p.vendor} does not declare`,
+        detail:
+          model === ''
+            ? `A printer preset in a vendor bundle with an empty \`printer_model\` is dropped on load — "defines no printer model, it will be ignored" (PresetBundle.cpp:4972). It will not appear in the slicer at all.`
+            : `\`printer_model\` is "${model}", and \`system/${p.vendor}.json\` declares ${[...declared.keys()].map((k) => `"${k}"`).join(', ')}. The match is against the entry name in that vendor's own \`machine_model_list\` (PresetBundle.cpp:4718), so this preset is dropped on load — "defines invalid printer model … it will be ignored" (PresetBundle.cpp:4988).`,
+        presetIds: [p.id],
+        reference: {
+          key: 'printer_model',
+          unresolved: [{ name: model, reason: 'absent' }],
+        },
+        weight: 870,
+      });
+      continue;
+    }
+
+    const variants = declared.get(model) ?? [];
+    if (variants.length > 0 && (variant === '' || !variants.includes(variant))) {
+      out.push({
+        id: `printer-variant:${p.id}`,
+        severity: 'high',
+        kind: 'missing-reference',
+        title:
+          variant === ''
+            ? `${p.name} declares no printer_variant, so it is never loaded`
+            : `${p.name} names a printer variant "${model}" does not have`,
+        detail:
+          variant === ''
+            ? `A printer preset in a vendor bundle with an empty \`printer_variant\` is dropped on load — "defines no printer variant, it will be ignored" (PresetBundle.cpp:4981).`
+            : `\`printer_variant\` is "${variant}", and the model file for "${model}" lists ${variants.map((v) => `"${v}"`).join(', ')} in its \`nozzle_diameter\` (PresetBundle.cpp:4739-4747). A variant that is not one of those means the preset is dropped on load — "defines invalid printer variant … it will be ignored" (PresetBundle.cpp:4997).`,
+        presetIds: [p.id],
+        reference: {
+          key: 'printer_variant',
+          unresolved: [{ name: variant, reason: 'absent' }],
+        },
+        weight: 860,
+      });
+    }
+  }
+
+  return out;
 }
 
 /**
