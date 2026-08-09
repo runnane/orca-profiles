@@ -27,6 +27,7 @@
  * path, so resolving a chain requires a name -> file map built from these.
  */
 
+import { parseQuotedList } from './normalize';
 import type { Preset, PresetKind, PresetScope, RawPreset } from './types';
 
 export interface ConfigFile {
@@ -38,6 +39,49 @@ export interface ConfigFile {
 export interface VendorIndexEntry {
   name: string;
   sub_path: string;
+}
+
+/** Which list in `system/<Vendor>.json` declared an entry. */
+export type VendorList = 'process_list' | 'filament_list' | 'machine_list' | 'machine_model_list';
+
+/**
+ * One `sub_path` entry out of a vendor index, and whether the file it names is
+ * actually there.
+ *
+ * A vendor index is not documentation: it is the list the slicer loads from, so
+ * an entry pointing at a file that is not on disk means that preset simply does
+ * not exist however much the index claims it does.
+ */
+export interface VendorRef {
+  vendor: string;
+  list: VendorList;
+  /** The declared name. For `machine_model_list` this is the model **id** the
+   * slicer matches `printer_model` against (`model.id = machine_model.first`,
+   * PresetBundle.cpp:4718) — not the `name` inside the model file. */
+  name: string;
+  /** As written in the index. */
+  subPath: string;
+  /** `system/<Vendor>/<sub_path>`, normalised. */
+  path: string;
+  /** Was a file at `path` among the files we were given? */
+  present: boolean;
+}
+
+/**
+ * A printer model declared by a vendor, as the slicer ends up holding it.
+ *
+ * `variants` comes from the model file's `nozzle_diameter` (a `;`-separated
+ * list, PresetBundle.cpp:4739-4747). A model with no variants is **never
+ * registered** (`if (! model.id.empty() && ! model.variants.empty())`,
+ * PresetBundle.cpp:4819), which is why a missing model file invalidates every
+ * printer preset that names it rather than merely being untidy.
+ */
+export interface VendorModel {
+  vendor: string;
+  id: string;
+  path: string;
+  present: boolean;
+  variants: string[];
 }
 
 export interface ConfigIndex {
@@ -54,15 +98,40 @@ export interface ConfigIndex {
   /** name -> active presets with that name, for `inherits` lookup. */
   byName: Map<string, Preset[]>;
   vendors: string[];
+  /** Every `sub_path` entry across every vendor index, with its file's presence. */
+  vendorRefs: VendorRef[];
+  /** Printer models declared by the vendor indexes. */
+  vendorModels: VendorModel[];
   /** Files that were present but could not be parsed. */
   parseErrors: { path: string; message: string }[];
 }
 
 const KINDS: PresetKind[] = ['filament', 'process', 'machine'];
 
+/** The vendor index lists that name presets. `machine_model_list` names models. */
+const PRESET_LISTS = ['process_list', 'filament_list', 'machine_list'] as const;
+
 function kindFromPath(path: string): PresetKind | undefined {
   const parts = path.split('/');
   return KINDS.find((k) => parts.includes(k));
+}
+
+/**
+ * A printer model's variants: the model file's `nozzle_diameter`, which is a
+ * `;`-separated list (`unescape_strings_cstyle`, PresetBundle.cpp:4739-4747).
+ * These are the values a system printer preset's `printer_variant` must be one
+ * of, so a model file we cannot read yields none rather than guessing.
+ */
+function readVariants(text: string): string[] {
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const nd = parsed.nozzle_diameter;
+    if (typeof nd === 'string') return parseQuotedList(nd).filter((v) => v !== '');
+    if (Array.isArray(nd)) return nd.map(String).filter((v) => v !== '');
+    return [];
+  } catch {
+    return [];
+  }
 }
 
 function normalisePath(p: string): string {
@@ -105,6 +174,12 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
   // Vendor index files tell us each system preset's declared name, which can
   // differ from its filename. Map path -> declared name so the preset picks it up.
   const declaredNameByPath = new Map<string, string>();
+  const byPath = new Map<string, ConfigFile>();
+  for (const f of files) byPath.set(normalisePath(f.path), f);
+  const vendorRefs: VendorRef[] = [];
+  const vendorModels: VendorModel[] = [];
+  /** Paths a `machine_model_list` points at, so they are not read as presets. */
+  const modelFiles = new Set<string>();
 
   for (const f of files) {
     const path = normalisePath(f.path);
@@ -119,12 +194,50 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
       parseErrors.push({ path, message: (e as Error).message });
       continue;
     }
-    for (const key of ['process_list', 'filament_list', 'machine_list'] as const) {
+    for (const key of PRESET_LISTS) {
       const list = parsed[key];
       if (!Array.isArray(list)) continue;
       for (const entry of list as VendorIndexEntry[]) {
         if (!entry?.sub_path || !entry?.name) continue;
-        declaredNameByPath.set(`system/${vendor}/${normalisePath(entry.sub_path)}`, entry.name);
+        const target = `system/${vendor}/${normalisePath(entry.sub_path)}`;
+        declaredNameByPath.set(target, entry.name);
+        vendorRefs.push({
+          vendor,
+          list: key,
+          name: entry.name,
+          subPath: entry.sub_path,
+          path: target,
+          present: byPath.has(target),
+        });
+      }
+    }
+
+    // Printer models. Their files live beside the machine presets but are not
+    // presets — the slicer parses them into `vendor_profile.models`
+    // (PresetBundle.cpp:4712-4820), and `kindFromPath` would otherwise count
+    // every one of them as a machine preset it is not.
+    const models = parsed.machine_model_list;
+    if (Array.isArray(models)) {
+      for (const entry of models as VendorIndexEntry[]) {
+        if (!entry?.sub_path || !entry?.name) continue;
+        const target = `system/${vendor}/${normalisePath(entry.sub_path)}`;
+        const file = byPath.get(target);
+        vendorRefs.push({
+          vendor,
+          list: 'machine_model_list',
+          name: entry.name,
+          subPath: entry.sub_path,
+          path: target,
+          present: file !== undefined,
+        });
+        modelFiles.add(target);
+        vendorModels.push({
+          vendor,
+          id: entry.name,
+          path: target,
+          present: file !== undefined,
+          variants: file ? readVariants(file.text) : [],
+        });
       }
     }
   }
@@ -132,8 +245,9 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
   for (const f of files) {
     const path = normalisePath(f.path);
     if (!path.endsWith('.json')) continue;
-    // Vendor indexes are not presets.
+    // Vendor indexes are not presets, and neither are printer model files.
     if (/^system\/[^/]+\.json$/.test(path)) continue;
+    if (modelFiles.has(path)) continue;
     const isSystem = path.startsWith('system/');
     const isUser = path.startsWith('user/');
     if (!isSystem && !isUser) continue;
@@ -214,31 +328,119 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
     byId,
     byName,
     vendors: [...vendors].sort(),
+    vendorRefs,
+    vendorModels,
     parseErrors,
   };
 }
 
 /**
- * Every preset that could satisfy an `inherits` of `name`.
+ * Why a preset reference resolved, or why it did not.
  *
- * `inherits` is resolved by name inside one `PresetCollection`
- * (`find_preset2(inherits_value)`, Preset.cpp:1734), and a collection holds the
- * system bundles plus **one** user folder. So a preset can only ever inherit
- * from a system preset or from a user preset in its own profile — never across
- * profiles, because the two are never loaded together.
+ * A preset names other presets by name — `inherits`, `compatible_printers`,
+ * `compatible_prints`, `default_print_profile`, `default_filament_profile` — and
+ * the slicer resolves each silently. "Not found" is the least useful thing we
+ * can say about a failure, because the four ways it fails need four different
+ * fixes:
+ *
+ *  - `resolved`         one loaded preset claims the name.
+ *  - `shadowed`         it resolves, but other files claim that name too and are
+ *                       never loaded ("Preset already present, not loading",
+ *                       Preset.cpp:1619). The reference is ambiguous on disk.
+ *  - `wrong-kind`       a preset of another type claims the name. Resolution
+ *                       happens inside one `PresetCollection` (`find_preset2`,
+ *                       Preset.cpp:3229) and a collection holds a single type,
+ *                       so this does **not** resolve — it only looks like it
+ *                       should.
+ *  - `unloaded-profile` it exists, in a user folder the slicer does not load
+ *                       (PresetBundle.cpp:528). Editing that file changes
+ *                       nothing here.
+ *  - `absent`           nothing loadable claims the name.
  */
-export function parentCandidates(index: ConfigIndex, name: string, from: Preset): Preset[] {
-  const candidates = index.byName.get(name);
-  if (!candidates || candidates.length === 0) return [];
-  const sameKind = candidates.filter((c) => c.kind === from.kind);
-  const pool = sameKind.length > 0 ? sameKind : candidates;
-  return pool.filter(
-    (c) => c.id !== from.id && (c.origin === 'system' || c.profile === from.profile),
-  );
+export type ReferenceReason =
+  | 'resolved'
+  | 'shadowed'
+  | 'wrong-kind'
+  | 'unloaded-profile'
+  | 'absent';
+
+export interface ReferenceResolution {
+  reason: ReferenceReason;
+  /** The preset the slicer would use. Absent unless `resolved` or `shadowed`. */
+  target?: Preset;
+  /**
+   * The other files claiming the name. For `shadowed` these are dead files; for
+   * `wrong-kind` and `unloaded-profile` they are what exists instead.
+   */
+  others: Preset[];
+  /** True when `target` beat `others` only on directory order — see `loadOrder`. */
+  arbitrary: boolean;
+  /**
+   * Set when the name only resolved through the slicer's `Generic` rewrite —
+   * see `genericAlias`. Holds the name that actually matched.
+   */
+  viaAlias?: string;
 }
 
 /**
- * The candidate the slicer would actually use.
+ * `find_preset2(name, auto_match = true)` — which is what every `inherits` call
+ * site passes (Preset.cpp:1674, :1947, :2284, :2703, :2967) — retries a name
+ * containing `Generic` as `Generic <material> @System` against the Orca filament
+ * library when the literal name is not found (Preset.cpp:3229-3245).
+ *
+ * Modelled because not modelling it invents a broken parent: a preset inheriting
+ * `Generic PLA` resolves in the slicer and would be reported here as dangling.
+ */
+export function genericAlias(name: string): string | undefined {
+  if (!name.includes('Generic')) return undefined;
+  const re = /^(?:.*?\b(?:\w+_)?)(Generic)\b\s+([^@]+?)\s*(?:@.*)?$/;
+  if (!re.test(name)) return undefined;
+  const alias = name.replace(re, 'Generic $2 @System');
+  return alias === name ? undefined : alias;
+}
+
+/**
+ * Resolve a reference from `from` to a preset of `targetKind` called `name`, and
+ * say why the answer is what it is.
+ *
+ * Candidates come from `byName`, which excludes `_local/` sync snapshots: the
+ * slicer never loads them, so one claiming a name does not make the name exist.
+ */
+export function classifyReference(
+  index: ConfigIndex,
+  from: Preset,
+  targetKind: PresetKind,
+  name: string,
+): ReferenceResolution {
+  const claimed = (index.byName.get(name) ?? []).filter((c) => c.id !== from.id);
+  if (claimed.length === 0) {
+    const alias = genericAlias(name);
+    if (alias) {
+      const viaAlias = classifyReference(index, from, targetKind, alias);
+      if (viaAlias.target) return { ...viaAlias, viaAlias: alias };
+    }
+    return { reason: 'absent', others: [], arbitrary: false };
+  }
+
+  const sameKind = claimed.filter((c) => c.kind === targetKind);
+  if (sameKind.length === 0) return { reason: 'wrong-kind', others: claimed, arbitrary: false };
+
+  // One `PresetCollection` holds the system bundles plus exactly one user folder
+  // (PresetBundle.cpp:528), so a user preset in another profile is not a
+  // candidate however right its name looks.
+  const loadable = sameKind.filter((c) => c.origin === 'system' || c.profile === from.profile);
+  if (loadable.length === 0) {
+    return { reason: 'unloaded-profile', others: sameKind, arbitrary: false };
+  }
+
+  const [target, ...others] = loadOrder(loadable);
+  return others.length > 0
+    ? { reason: 'shadowed', target, others, arbitrary: tieIsArbitrary(loadable) }
+    : { reason: 'resolved', target, others: [], arbitrary: false };
+}
+
+/**
+ * The preset the slicer would actually use for an `inherits` of `name`.
  *
  * Load order decides, and it is: system bundles, then the user folder's
  * `base/` subdirectory ("Load custom roots first", Preset.cpp:1583), then the
@@ -246,13 +448,7 @@ export function parentCandidates(index: ConfigIndex, name: string, from: Preset)
  * is skipped outright ("Preset already present, not loading", Preset.cpp:1619).
  */
 export function lookupParent(index: ConfigIndex, name: string, from: Preset): Preset | undefined {
-  const pool = parentCandidates(index, name, from);
-  if (pool.length === 0) return undefined;
-  return (
-    pool.find((c) => c.origin === 'system') ??
-    pool.find((c) => c.isCustomRoot) ??
-    pool[0]
-  );
+  return classifyReference(index, from, from.kind, name).target;
 }
 
 /**

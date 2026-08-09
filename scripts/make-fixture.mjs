@@ -44,27 +44,54 @@ rmSync(ROOT, { recursive: true, force: true });
 // public product data rather than anything personal.
 
 const acmeFilaments = [
-  ['fdm_filament_common', { name: 'fdm_filament_common', ...bulkSettings(1), nozzle_temperature: '200', filament_flow_ratio: '0.98' }],
-  ['fdm_filament_abs', { name: 'fdm_filament_abs', inherits: 'fdm_filament_common', nozzle_temperature: '250', hot_plate_temp: '90' }],
+  ['fdm_filament_common', { name: 'fdm_filament_common', instantiation: 'false', ...bulkSettings(1), nozzle_temperature: '200', filament_flow_ratio: '0.98' }],
+  ['fdm_filament_abs', { name: 'fdm_filament_abs', instantiation: 'false', inherits: 'fdm_filament_common', nozzle_temperature: '250', hot_plate_temp: '90' }],
   ['Acme ABS @System', { name: 'Acme ABS @System', inherits: 'fdm_filament_abs', setting_id: 'ACMEABS000000001', filament_max_volumetric_speed: '8' }],
   ['Acme PLA @System', { name: 'Acme PLA @System', inherits: 'fdm_filament_common', setting_id: 'ACMEPLA000000001', nozzle_temperature: '215' }],
 ];
 
 const acmeProcesses = [
-  ['fdm_process_common', { name: 'fdm_process_common', ...bulkSettings(2), layer_height: '0.2', wall_loops: '2' }],
-  ['fdm_process_acme_common', { name: 'fdm_process_acme_common', inherits: 'fdm_process_common', default_acceleration: '5000' }],
+  ['fdm_process_common', { name: 'fdm_process_common', instantiation: 'false', ...bulkSettings(2), layer_height: '0.2', wall_loops: '2' }],
+  ['fdm_process_acme_common', { name: 'fdm_process_acme_common', instantiation: 'false', inherits: 'fdm_process_common', default_acceleration: '5000' }],
   ['0.20mm Standard @Acme', { name: '0.20mm Standard @Acme', inherits: 'fdm_process_acme_common', layer_height: '0.2', top_shell_thickness: '0.8' }],
   ['0.28mm Draft @Acme', { name: '0.28mm Draft @Acme', inherits: '0.20mm Standard @Acme', layer_height: '0.28', wall_loops: '3' }],
 ];
 
 const acmeMachines = [
-  ['fdm_machine_common', { name: 'fdm_machine_common', ...bulkSettings(3), printable_height: '250' }],
-  ['Acme Cube 0.4 nozzle', { name: 'Acme Cube 0.4 nozzle', inherits: 'fdm_machine_common', printer_model: 'Acme Cube', nozzle_diameter: '0.4' }],
+  ['fdm_machine_common', { name: 'fdm_machine_common', instantiation: 'false', ...bulkSettings(3), printable_height: '250' }],
+  // A valid vendor printer preset: its `printer_model` is an entry in Acme's
+  // `machine_model_list` below, and its `printer_variant` is one of that model's
+  // nozzle diameters. Both are load-time requirements, not documentation
+  // (PresetBundle.cpp:4988, :4997).
+  [
+    'Acme Cube 0.4 nozzle',
+    {
+      name: 'Acme Cube 0.4 nozzle',
+      instantiation: 'true',
+      inherits: 'fdm_machine_common',
+      printer_model: 'Acme Cube',
+      printer_variant: '0.4',
+      nozzle_diameter: '0.4',
+      default_print_profile: '0.20mm Standard @Acme',
+      default_filament_profile: ['Acme PLA @System'],
+    },
+  ],
 ];
 
 for (const [, p] of acmeFilaments) write(`system/Acme/filament/${p.name}.json`, p);
 for (const [, p] of acmeProcesses) write(`system/Acme/process/${p.name}.json`, p);
 for (const [, p] of acmeMachines) write(`system/Acme/machine/${p.name}.json`, p);
+
+// A printer *model*, not a preset: it declares the variants a machine preset's
+// `printer_variant` has to be one of. It sits in `machine/` beside the presets
+// and must not be counted as one (PresetBundle.cpp:4712-4820).
+write('system/Acme/machine/Acme Cube.json', {
+  name: 'Acme Cube',
+  model_id: 'acme-cube',
+  nozzle_diameter: '0.4;0.6',
+  machine_tech: 'FFF',
+  family: 'Acme',
+});
 
 write('system/Acme.json', {
   name: 'Acme',
@@ -81,14 +108,35 @@ const globexFilaments = [
   ['Globex PETG @System', { name: 'Globex PETG @System', inherits: 'fdm_filament_common', nozzle_temperature: '240' }],
 ];
 for (const [, p] of globexFilaments) write(`system/Globex/filament/${p.name}.json`, p);
+
+// A vendor printer preset naming a model this vendor never declares: Globex has
+// no `machine_model_list` entry for "Globex Box", so the slicer drops the preset
+// on load rather than showing it (PresetBundle.cpp:4988). Written on purpose.
+write('system/Globex/machine/Globex Box 0.4 nozzle.json', {
+  name: 'Globex Box 0.4 nozzle',
+  instantiation: 'true',
+  inherits: 'fdm_machine_common',
+  printer_model: 'Globex Box',
+  printer_variant: '0.4',
+  nozzle_diameter: '0.4',
+});
+
 write('system/Globex.json', {
   name: 'Globex',
   version: '01.00.00.00',
   description: 'Globex configurations',
-  machine_model_list: [],
-  filament_list: globexFilaments.map(([n]) => ({ name: n, sub_path: `filament/${n}.json` })),
+  // Declared so Globex has a model list at all, and deliberately pointing at a
+  // file that is never written: a model with no file has no variants, so it is
+  // never registered and every preset naming it is rejected.
+  machine_model_list: [{ name: 'Globex Slab', sub_path: 'machine/Globex Slab.json' }],
+  filament_list: [
+    ...globexFilaments.map(([n]) => ({ name: n, sub_path: `filament/${n}.json` })),
+    // An index entry with no file behind it — a broken install, invisible until
+    // something tries to inherit from the name.
+    { name: 'Globex TPU @System', sub_path: 'filament/Globex TPU @System.json' },
+  ],
   process_list: [],
-  machine_list: [],
+  machine_list: [{ name: 'Globex Box 0.4 nozzle', sub_path: 'machine/Globex Box 0.4 nozzle.json' }],
 });
 
 // ─── the live user profile ─────────────────────────────────────────────────
@@ -236,6 +284,11 @@ write('user/default/machine/Workshop Cube MK2.json', {
   print_host: '',
   printhost_apikey: '',
   nozzle_diameter: '0.6',
+  // The presets the slicer switches to when this printer is selected. The
+  // process is not installed, so it silently selects something else instead; the
+  // filament is, so only one of the two is a finding.
+  default_print_profile: '0.16mm Fine @Acme',
+  default_filament_profile: ['Studio ABS'],
 });
 
 // A filament limited to printers that are not installed.
@@ -245,6 +298,47 @@ write('user/default/filament/Legacy PETG.json', {
   inherits: 'Globex PETG @System',
   compatible_printers: ['Retired Printer A', 'Retired Printer B'],
   nozzle_temperature: '245',
+});
+
+// The same fault written the other way. A hand-edited or round-tripped preset
+// stores the vector serialised, and the array-only check never looked at it — so
+// this shape exists to make that check able to fail.
+write('user/default/filament/Retired PETG.json', {
+  name: 'Retired PETG',
+  from: 'User',
+  inherits: 'Globex PETG @System',
+  compatible_printers: '"Retired Printer A";"Retired Printer B"',
+  nozzle_temperature: '250',
+});
+
+// A filament pinned to a process that is not installed. Different key, different
+// consequence: it never becomes selectable *with that process*.
+write('user/default/filament/Studio ABS Fine Only.json', {
+  name: 'Studio ABS Fine Only',
+  from: 'User',
+  inherits: 'Acme ABS @System',
+  compatible_prints: ['0.10mm Ultrafine @Acme'],
+  compatible_printers: ['Workshop Cube'],
+  nozzle_temperature: '255',
+});
+
+// A filament whose `inherits` names a **process** preset. It looks resolvable and
+// is not: a name is resolved inside one collection, and a collection holds a
+// single preset type (Preset.cpp:3229).
+write('user/default/filament/Muddled ABS.json', {
+  name: 'Muddled ABS',
+  from: 'User',
+  inherits: '0.20mm Standard @Acme',
+  nozzle_temperature: '260',
+});
+
+// A preset whose parent exists — but only in the cloud profile, which is not the
+// loaded one. Indistinguishable from "you deleted it" until the finding says so.
+write('user/default/process/Wants Cloud Base.json', {
+  name: 'Wants Cloud Base',
+  from: 'User',
+  inherits: 'Cloud Only',
+  layer_height: '0.22',
 });
 
 // ─── an inactive profile + its sync snapshots ──────────────────────────────

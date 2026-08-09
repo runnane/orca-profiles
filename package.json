@@ -13,7 +13,7 @@
     "lint": "oxlint src",
     "test": "pnpm fixture && vitest run",
     "gates": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
-    "smoke": "playwright test",
+    "smoke": "playwright test e2e/smoke.spec.ts e2e/read-bench.spec.ts",
     "report": "node scripts/build-report.mjs && node dist-cli/report.mjs",
     "docker:build": "docker build -t orca-profiles:latest .",
     "docker:run": "docker run --rm -p 127.0.0.1:8099:8099 -v \"${ORCA_CONFIG:-$HOME/.config/OrcaSlicer}:/config:ro\" --read-only --security-opt no-new-privileges:true orca-profiles:latest",

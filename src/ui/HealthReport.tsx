@@ -23,6 +23,7 @@ const KIND_LABEL: Record<Finding['kind'], string> = {
   'broken-parent': 'Missing parents',
   'circular-inherits': 'Inheritance loops',
   'orphaned-printer': 'Missing printers',
+  'missing-reference': 'Dangling references',
   'duplicate-name': 'Files never loaded',
   'parse-error': 'Unreadable files',
 };
@@ -89,6 +90,11 @@ export function HealthReport({
               {f.title}
             </div>
             <div className="fdetail">{f.detail}</div>
+            {/* A finding about the vendor index names files rather than presets;
+                without this it would have nothing to act on. */}
+            {presets.length === 0 && f.paths && f.paths.length > 0 && (
+              <div className="fdetail mono faint">{f.paths.join(' · ')}</div>
+            )}
             <div className="factions">
               {presets.slice(0, 4).map((p) => (
                 <button key={p.id} type="button" className="chip" onClick={() => onSelect(p.id)}>
