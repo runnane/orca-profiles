@@ -171,9 +171,31 @@ The app needs exactly one field from that file — which user profile is live �
 that is the only field served. This was found by diffing a real config against
 what the API returned; a fixture with blank credentials had reported it clean.
 
-The container publishes on **loopback only** and mounts the config `:ro`. To
-reach it from elsewhere, tunnel (`ssh -L 8099:localhost:8099 host`) rather than
-binding it to `0.0.0.0`.
+## Exposure
+
+The container mounts the config `:ro` and publishes on **loopback by default**.
+`ORCA_BIND` widens that:
+
+```bash
+ORCA_BIND=127.0.0.1    docker compose up -d   # default: this machine only
+ORCA_BIND=172.20.100.3 docker compose up -d   # a specific LAN address
+ORCA_BIND=100.64.64.3  docker compose up -d   # a tailnet address
+ORCA_BIND=0.0.0.0      docker compose up -d   # every interface, bridges included
+```
+
+Prefer naming the interface over `0.0.0.0`: on a docker host the latter also
+publishes onto every bridge network, which is a wider surface than intended.
+
+**There is no authentication.** Credentials are stripped server-side, so a
+listener cannot lift a printer API key, password, pairing code or LAN address
+from it — but anyone who can reach the port can read your printer, filament and
+process presets, and the printer model names in them. That is a reasonable
+trade on a home LAN and a bad one on anything shared or routable. If it ever
+needs to leave a trusted network, put it behind a reverse proxy that
+authenticates, rather than exposing this port.
+
+Verify exposure **from a different machine** — a request made on the host itself
+proves nothing, since loopback answers either way.
 
 ## Layout
 

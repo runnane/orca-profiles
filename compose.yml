@@ -2,12 +2,16 @@ services:
   orca-profiles:
     build: .
     image: orca-profiles:latest
-    # Published on loopback only. Point a browser at http://localhost:8099, or
-    # tunnel it (`ssh -L 8099:localhost:8099 <host>`) to reach it from a laptop.
-    # To share it on a tailnet, replace with "<tailscale-ip>:8099:8099" — never
-    # bind a printer config to 0.0.0.0 on an untrusted network.
+    # Where to publish. Defaults to loopback; set ORCA_BIND to a LAN or tailnet
+    # address to reach it from other machines. `0.0.0.0` publishes on every
+    # interface, which on a docker host also means every bridge network.
+    #
+    # There is no authentication in front of this. Credentials are stripped
+    # server-side (see src/domain/redact.ts), but anyone who can reach the port
+    # can read your printer and filament presets, so keep it off untrusted
+    # networks.
     ports:
-      - "127.0.0.1:8099:8099"
+      - "${ORCA_BIND:-127.0.0.1}:${ORCA_PORT:-8099}:8099"
     volumes:
       # The OrcaSlicer config. Read-only: this app never writes to it.
       - ${ORCA_CONFIG:-~/.config/OrcaSlicer}:/config:ro
