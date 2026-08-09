@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyze, stats } from './analyze';
 import { compatibilityFor, compatibilitySummary } from './compatibility';
+import { evaluateCondition, printerInjectedVars } from './condition';
 import { diffEffective, diffRaw } from './diff';
 import { buildGraph } from './graph';
 import {
@@ -26,6 +27,7 @@ import { parseQuotedList, scalarAsList, valuesEqual } from './normalize';
 import { presetReferences, referenceNames } from './references';
 import { isSensitiveKey, maskValue, redactConfJson, redactPresetJson, REDACTED } from './redact';
 import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
+import type { RawValue } from './types';
 
 const FIXTURE = new URL('../../fixtures/config', import.meta.url).pathname;
 const index: ConfigIndex = buildIndex(loadConfigDir(FIXTURE));
@@ -676,6 +678,157 @@ describe('inheritance graph', () => {
   });
 });
 
+describe('condition subset', () => {
+  const ctx = (values: Record<string, RawValue>, injected?: Record<string, RawValue>) => ({
+    lookup: (k: string) => values[k],
+    injected,
+  });
+  const ev = (expr: string, values: Record<string, RawValue> = {}, injected?: Record<string, RawValue>) =>
+    evaluateCondition(expr, ctx(values, injected));
+
+  it('matches a regex against the whole subject, not a substring', () => {
+    // `=~` compiles to `regex_match` (PlaceholderParser.cpp:687-709), which
+    // requires the WHOLE subject to match. This is the trap: an unanchored JS
+    // RegExp inverts every real condition, which are all written `/.*X.*/`
+    // *because* of this rule.
+    const notes = { printer_notes: 'PRINTER_VENDOR_ACME\nPRINTER_MODEL_CUBE' };
+    expect(ev('printer_notes=~/.*ACME.*/', notes)).toBe(true);
+    expect(ev('printer_notes=~/ACME/', notes)).toBe(false);
+    expect(ev('printer_notes!~/ACME/', notes)).toBe(true);
+    expect(ev('printer_notes=~/.*NOPE.*/', notes)).toBe(false);
+  });
+
+  it('compares an indexed vector element numerically', () => {
+    for (const nozzle of ['0.4,0.6', ['0.4', '0.6']] as RawValue[]) {
+      expect(ev('nozzle_diameter[0]==0.4', { nozzle_diameter: nozzle })).toBe(true);
+      expect(ev('nozzle_diameter[1]>0.5', { nozzle_diameter: nozzle })).toBe(true);
+      expect(ev('nozzle_diameter[0]>=0.4 and nozzle_diameter[0]<=0.4', { nozzle_diameter: nozzle })).toBe(
+        true,
+      );
+      // Out of range is a throw in the slicer, so no claim either way.
+      expect(ev('nozzle_diameter[7]==0.4', { nozzle_diameter: nozzle })).toBe('undetermined');
+    }
+  });
+
+  it('uses the slicer\'s epsilon for numeric equality', () => {
+    // `std::abs(lhs - rhs) < 1e-8` (compare_op), not an exact float compare.
+    expect(ev('layer_height==0.2', { layer_height: '0.20000000001' })).toBe(true);
+    expect(ev('layer_height==0.2', { layer_height: '0.2001' })).toBe(false);
+  });
+
+  it('reads the variables the slicer injects rather than the config', () => {
+    const injected = printerInjectedVars('Shop One', '0.4,0.4');
+    expect(ev('num_extruders>1', {}, injected)).toBe(true);
+    expect(ev('num_extruders==2', {}, injected)).toBe(true);
+    expect(ev('printer_preset=~/.*One.*/', {}, injected)).toBe(true);
+    // A single-nozzle printer, written either way.
+    expect(ev('num_extruders==1', {}, printerInjectedVars('X', ['0.4']))).toBe(true);
+    expect(ev('num_extruders==1', {}, printerInjectedVars('X', '0.4'))).toBe(true);
+  });
+
+  it('binds `and` tighter than `or`', () => {
+    // The precedence trap (PlaceholderParser.cpp:2223-2231). With the wrong
+    // grouping — `(true or false) and false` — this is false.
+    expect(ev('true or false and false')).toBe(true);
+    expect(ev('(true or false) and false')).toBe(false);
+    expect(ev('false and true or true')).toBe(true);
+  });
+
+  it('binds equality looser than comparison', () => {
+    // `a == b < c` parses as `a == (b < c)`, so this compares a bool to a bool.
+    expect(ev('true==1<2')).toBe(true);
+    expect(ev('false==1<2')).toBe(false);
+  });
+
+  it('handles not, parentheses and both operator spellings', () => {
+    expect(ev('not false')).toBe(true);
+    expect(ev('!false')).toBe(true);
+    expect(ev('true && !(false || false)')).toBe(true);
+    // `nothing` must not be read as `not` + `hing`.
+    expect(ev('nothing==1', { nothing: '1' })).toBe(true);
+  });
+
+  it('never short-circuits to a boolean past something it cannot evaluate', () => {
+    // THE important one, and it has to use sides that *parse* — an expression that
+    // fails to parse is undetermined for that reason alone, which would make this
+    // test pass without exercising the rule at all.
+    //
+    // An operand we cannot evaluate is either valid-but-unmodelled (so the slicer
+    // computes `false and X` = false) or invalid (so it throws, and a throw means
+    // compatible = true). Opposite answers, nothing to tell them apart.
+    const known = { layer_height: '0.2' };
+    expect(ev('layer_height==0.9 and absent_key=="x"', known)).toBe('undetermined');
+    expect(ev('layer_height==0.2 or absent_key=="x"', known)).toBe('undetermined');
+    expect(ev('absent_key=="x" and layer_height==0.9', known)).toBe('undetermined');
+    // An uncompilable pattern parses fine and is equally unevaluable.
+    expect(ev('layer_height==0.9 and printer_notes=~/[/', { ...known, printer_notes: 'X' })).toBe(
+      'undetermined',
+    );
+    // The determinate cases still are determinate — this must not swallow everything.
+    expect(ev('layer_height==0.9 and layer_height==0.2', known)).toBe(false);
+    expect(ev('layer_height==0.9 or layer_height==0.2', known)).toBe(true);
+  });
+
+  it('is undetermined for every construct outside the subset', () => {
+    for (const expr of [
+      'interpolate_table(nozzle_diameter[0], (0.4, 1)) > 0.5',
+      'min(1, 2) == 1',
+      'empty(printer_notes)',
+      'size(nozzle_diameter) == 2',
+      'is_nil(layer_height)',
+      'true ? true : false',
+      'layer_height * 2 == 0.4',
+      'layer_height + 1 > 1',
+      'nozzle_diameter[0+1]==0.6',
+      'printer_notes',
+      'layer_height',
+      '',
+      '(true',
+      'true and',
+      'printer_notes=~/(unclosed/',
+    ]) {
+      expect(evaluateCondition(expr, ctx({ layer_height: '0.2', printer_notes: 'X', nozzle_diameter: '0.4,0.6' }))).toBe(
+        'undetermined',
+      );
+    }
+  });
+
+  it('is undetermined for an uncompilable pattern rather than a non-match', () => {
+    // The slicer's regex dialect is close to JS but not identical, and a compile
+    // failure there means compatible anyway — so this is never `false`.
+    expect(ev('printer_notes=~/[/', { printer_notes: 'X' })).toBe('undetermined');
+  });
+
+  it('is undetermined when the left side of a match is not a string', () => {
+    // "Left hand side of a regex match must be a string" (Preset.cpp:697-699).
+    expect(ev('layer_height=~/.*2.*/', { layer_height: '0.2' })).toBe('undetermined');
+  });
+
+  it('is undetermined for a key this config does not carry', () => {
+    // The slicer evaluates against a config holding a default for every option;
+    // we hold only what is on disk plus what is inherited. An absent key is much
+    // more likely a default than a typo, and we cannot tell.
+    expect(ev('printer_notes=~/.*X.*/')).toBe('undetermined');
+    expect(ev('printer_notes=~/.*X.*/ and true')).toBe('undetermined');
+  });
+
+  it('is undetermined for a comparison whose branch depends on a type we lack', () => {
+    // `compare_op` string-compares when either side is a string and numerically
+    // when both are numeric; the option's declared type decides, and we do not
+    // have it.
+    expect(ev('printer_model==0.4', { printer_model: 'Cube' })).toBe('undetermined');
+    // Explicit string literals are unambiguous, so those do compare.
+    expect(ev('printer_model=="Cube"', { printer_model: 'Cube' })).toBe(true);
+    expect(ev('printer_model!="Slab"', { printer_model: 'Cube' })).toBe(true);
+  });
+
+  it('reads an unindexed single-element vector as the scalar it is', () => {
+    expect(ev('nozzle_diameter==0.4', { nozzle_diameter: ['0.4'] })).toBe(true);
+    // …but a multi-element one needs an index, as the slicer does.
+    expect(ev('nozzle_diameter==0.4', { nozzle_diameter: ['0.4', '0.6'] })).toBe('undetermined');
+  });
+});
+
 describe('printer compatibility', () => {
   const machine = byFile('user/default/machine/Workshop Cube.json');
   const c = compatibilityFor(index, machine);
@@ -760,16 +913,33 @@ describe('printer compatibility', () => {
     expect(gate?.names).toEqual(['0.20mm Standard @Acme']);
   });
 
-  it('says undetermined for a condition instead of guessing', () => {
-    for (const name of ['Studio PLA Conditional', 'Studio PLA Opaque']) {
-      const v = verdict(name);
-      expect(v.included).toBe('undetermined');
-      expect(v.reason).toBe('condition');
-      // The expression verbatim: "it depends on this, which we do not evaluate"
-      // is a real answer; a boolean here would not be.
-      expect(v.evidence.key).toBe('compatible_printers_condition');
-      expect(v.evidence.value.length).toBeGreaterThan(10);
-    }
+  it('evaluates a condition inside the subset, against resolved settings', () => {
+    // `printer_notes=~/.*ACME_CUBE.*/ and nozzle_diameter[0]==0.4`. Neither key is
+    // written on `Workshop Cube`; both come from the vendor preset it inherits, so
+    // this also pins that conditions see the *resolved* config.
+    const v = verdict('Studio PLA Conditional');
+    expect(v.included).toBe(true);
+    expect(v.reason).toBe('condition');
+    expect(v.evidence.key).toBe('compatible_printers_condition');
+  });
+
+  it('reaches the opposite verdict for a printer the condition excludes', () => {
+    // Same filament, and `Workshop Cube MK2` overrides `nozzle_diameter` to 0.6.
+    const mk2 = byFile('user/default/machine/Workshop Cube MK2.json');
+    const v = compatibilityFor(index, mk2).filaments.find(
+      (x) => x.preset.name === 'Studio PLA Conditional',
+    );
+    expect(v?.included).toBe(false);
+    expect(v?.reason).toBe('condition');
+  });
+
+  it('stays undetermined for a condition outside the subset', () => {
+    // `interpolate_table(…)` — a function we do not implement. The expression is
+    // reported verbatim so the answer is "it depends on this", not a guess.
+    const v = verdict('Studio PLA Opaque');
+    expect(v.included).toBe('undetermined');
+    expect(v.reason).toBe('condition');
+    expect(v.evidence.value).toContain('interpolate_table');
   });
 
   it('never treats a condition as a name list', () => {
@@ -869,7 +1039,9 @@ describe('printer compatibility', () => {
   it('summarises without re-deriving anything', () => {
     const s = compatibilitySummary(c.filaments);
     expect(s.yes + s.no + s.undetermined).toBe(c.filaments.length);
-    expect(s.undetermined).toBe(2);
+    // One of the two conditional filaments is now decided; the `interpolate_table`
+    // one is not, and must not be rounded to a boolean.
+    expect(s.undetermined).toBe(1);
   });
 });
 

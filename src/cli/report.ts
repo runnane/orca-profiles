@@ -36,7 +36,7 @@ const REASON: Record<CompatibilityReason, string> = {
   'named-via-parent': 'this printer inherits from a preset it names',
   excluded: '`compatible_printers` names other printers only',
   'excluded-by-library': 'a vendor ships its own version of this alias for this printer',
-  condition: 'decided by a condition this tool does not evaluate',
+  condition: 'decided by a condition on the printer\'s settings',
   'never-loaded': 'lost a name clash, so the slicer never loads it',
 };
 
@@ -150,14 +150,20 @@ if (machines.length > 0) {
     console.log(
       `    processes  ${pr.yes} available · ${pr.no} excluded${pr.undetermined > 0 ? ` · ${pr.undetermined} undetermined` : ''}`,
     );
-    // Only the answers that need explaining. "Available because the printer
-    // inherits from a preset the filament names" is the surprising one.
+    // Only the answers that need explaining: anything not plainly available, plus
+    // the two that are available for a reason nobody would guess — the parent
+    // clause, and a condition that matched.
     const notable = [...c.filaments, ...c.processes].filter(
-      (x) => x.included !== true || x.reason === 'named-via-parent',
+      (x) => x.included !== true || x.reason === 'named-via-parent' || x.reason === 'condition',
     );
     for (const x of notable.slice(0, 8)) {
-      console.log(`    ${verdictWord(x.included).padEnd(12)} ${x.preset.name} — ${REASON[x.reason]}`);
-      if (x.included === 'undetermined') console.log(`                 ${x.evidence.value}`);
+      const why =
+        x.reason === 'condition' && x.included === 'undetermined'
+          ? 'depends on a condition outside the subset we evaluate'
+          : REASON[x.reason];
+      console.log(`    ${verdictWord(x.included).padEnd(12)} ${x.preset.name} — ${why}`);
+      // The expression verbatim, for the two cases where it is the answer.
+      if (x.reason === 'condition') console.log(`                 ${x.evidence.value}`);
     }
     if (notable.length > 8) console.log(`    … and ${notable.length - 8} more`);
     console.log();

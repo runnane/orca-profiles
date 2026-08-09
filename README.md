@@ -158,11 +158,33 @@ against
 [:5439](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L5439)),
 so a `compatible_prints` on a process is dead weight.
 
-**Conditions are not evaluated.** `compatible_printers_condition` is a
-PlaceholderParser expression over the printer's config, not a name list, and this
-app does not ship a PlaceholderParser. Those come back **undetermined**, with the
+**Conditions are evaluated only as far as a documented subset goes, and are
+`undetermined` outside it — never a boolean.** `compatible_printers_condition` is a
+PlaceholderParser expression over the printer's *resolved* config, not a name list,
+and this app does not ship a PlaceholderParser. What it does implement:
+`and` / `or` / `not`, `==` `!=` `<>`, `<` `<=` `>` `>=`, `=~` / `!~` with a
+`/pattern/`, parentheses, numbers, quoted strings, and identifiers with a literal
+index (`nozzle_diameter[0]`). Arithmetic, the ternary and every function
+(`one_of`, `interpolate_table`, …) are out, and land on **undetermined** with the
 expression shown verbatim — "this depends on a condition we do not evaluate:
-`printer_notes=~/.*ACME.*/`" is a real answer; a guess would not be.
+`interpolate_table(…)`" is a real answer; a guess would not be.
+
+Three details in there are the difference between an answer and a wrong answer, so
+they are worth stating:
+
+- **`=~` is a whole-string match** (`regex_match`,
+  [PlaceholderParser.cpp:687](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PlaceholderParser.cpp#L687)) —
+  which is precisely why every real condition is written `/.*PATTERN.*/`.
+- The regex library is **boost::regex** in its `perl` grammar, not `std::regex`
+  ([PlaceholderParser.cpp:59-66](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PlaceholderParser.cpp#L59)),
+  so `.` matches a newline — and `printer_notes` is routinely multi-line.
+- **`and` binds tighter than `or`**, and equality binds *looser* than comparison
+  ([PlaceholderParser.cpp:2223-2255](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PlaceholderParser.cpp#L2223)).
+
+Nothing short-circuits, deliberately. `false and <unsupported>` is not `false`,
+because an unsupported sub-expression is either valid-but-unmodelled (the slicer
+computes `false`) or invalid (the slicer throws, and a throw means *compatible*) —
+opposite answers, with nothing in the config to tell them apart.
 
 Being the printer's `default_filament_profile` / `default_print_profile` is **not**
 part of this rule: it decides what gets *selected* when you pick the printer
