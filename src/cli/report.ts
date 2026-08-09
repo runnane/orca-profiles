@@ -13,11 +13,36 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { analyze, stats } from '../domain/analyze';
+import {
+  compatibilityFor,
+  compatibilitySummary,
+  type Compatibility,
+  type CompatibilityReason,
+} from '../domain/compatibility';
 import { buildIndex, type ConfigFile } from '../domain/index-config';
 import { isSensitiveKey } from '../domain/redact';
 import { ownOverrides } from '../domain/resolve';
 
 const SKIP_DIRS = new Set(['cache', 'log', 'plugins', 'ota', 'resources']);
+
+/**
+ * Why a preset is or is not offered, in one clause. `undetermined` is a state of
+ * its own here as it is in the domain type — a condition we do not evaluate is
+ * reported as such rather than rounded to yes or no.
+ */
+const REASON: Record<CompatibilityReason, string> = {
+  'compatible-with-everything': 'names no printers, so it goes with all of them',
+  'named-explicitly': 'this printer is named in `compatible_printers`',
+  'named-via-parent': 'this printer inherits from a preset it names',
+  excluded: '`compatible_printers` names other printers only',
+  'excluded-by-library': 'a vendor ships its own version of this alias for this printer',
+  condition: 'decided by a condition this tool does not evaluate',
+  'never-loaded': 'lost a name clash, so the slicer never loads it',
+};
+
+function verdictWord(v: Compatibility['included']): string {
+  return v === true ? 'available' : v === false ? 'excluded' : 'undetermined';
+}
 
 function readConfigDir(root: string): ConfigFile[] {
   const out: ConfigFile[] = [];
@@ -107,6 +132,37 @@ const rows = index.active
   .filter((r) => r.stored > 20)
   .sort((a, b) => b.stored - a.stored)
   .slice(0, 12);
+
+// Per printer: what it actually gets. Same domain code as the app, so a line
+// here is a line the app shows. Names only, never a setting value.
+const machines = index.active.filter((p) => p.kind === 'machine' && p.origin === 'user');
+if (machines.length > 0) {
+  console.log('What each printer gets');
+  console.log(line());
+  for (const m of machines) {
+    const c = compatibilityFor(index, m);
+    const f = compatibilitySummary(c.filaments);
+    const pr = compatibilitySummary(c.processes);
+    console.log(`  ${m.name}`);
+    console.log(
+      `    filaments  ${f.yes} available · ${f.no} excluded${f.undetermined > 0 ? ` · ${f.undetermined} undetermined` : ''}`,
+    );
+    console.log(
+      `    processes  ${pr.yes} available · ${pr.no} excluded${pr.undetermined > 0 ? ` · ${pr.undetermined} undetermined` : ''}`,
+    );
+    // Only the answers that need explaining. "Available because the printer
+    // inherits from a preset the filament names" is the surprising one.
+    const notable = [...c.filaments, ...c.processes].filter(
+      (x) => x.included !== true || x.reason === 'named-via-parent',
+    );
+    for (const x of notable.slice(0, 8)) {
+      console.log(`    ${verdictWord(x.included).padEnd(12)} ${x.preset.name} — ${REASON[x.reason]}`);
+      if (x.included === 'undetermined') console.log(`                 ${x.evidence.value}`);
+    }
+    if (notable.length > 8) console.log(`    … and ${notable.length - 8} more`);
+    console.log();
+  }
+}
 
 if (rows.length > 0) {
   console.log('Presets that look bigger than they are');
