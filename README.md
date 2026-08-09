@@ -39,6 +39,17 @@ The slicer shows you the 49 resolved numbers with no indication of which are
 yours. This app shows the chain, marks every value with the preset that supplied
 it, and separates the edits that change something from the ones that do not.
 
+One chain at a time answers "what is in this preset". The **Graph** tab draws the
+whole forest instead, because the rest of the questions are shape questions: which
+vendor base is carrying everything, which of your presets are floating free, where
+a chain is unexpectedly deep — and which subtrees are dead because a file lost a
+name clash or sits under a profile the slicer does not load. Edges point at the
+parent OrcaSlicer *would load*, so where two files claim one name the graph shows
+the one that wins; a loop is drawn and marked rather than followed. It defaults to
+your presets and their ancestors, because a real config is a user folder plus a few
+thousand vendor presets and a diagram nobody can read is the same failure as the
+359-key file.
+
 Worked example from a real config — `0.28mm Extra Draft @Elegoo CC2 - Copy`
 stores **359 keys**, and the app reduces it to:
 
@@ -245,7 +256,7 @@ proves nothing, since loopback answers either way.
 
 | Path | What |
 |---|---|
-| `src/domain/` | Pure logic: index, resolve, diff, analyze, normalize, redact |
+| `src/domain/` | Pure logic: index, resolve, diff, analyze, graph, normalize, redact |
 | `src/source/` | File System Access reader |
 | `src/ui/` | React views |
 | `scripts/make-fixture.mjs` | Generates `fixtures/` — synthetic, gitignored, never a real config |

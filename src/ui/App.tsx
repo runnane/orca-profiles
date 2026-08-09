@@ -12,10 +12,11 @@ import type { Preset, PresetKind, PresetOrigin } from '../domain/types';
 import { isFileSystemAccessSupported, pickAndReadConfig } from '../source/fs-access';
 import { fetchServerConfig, serverConfigAvailable } from '../source/http';
 import { CompareView } from './CompareView';
+import { GraphView } from './GraphView';
 import { HealthReport } from './HealthReport';
 import { PresetDetail } from './PresetDetail';
 
-type Tab = 'presets' | 'health' | 'compare';
+type Tab = 'presets' | 'graph' | 'health' | 'compare';
 
 const KINDS: PresetKind[] = ['filament', 'process', 'machine'];
 const ORIGINS: PresetOrigin[] = ['user', 'system'];
@@ -232,6 +233,14 @@ export function App() {
           <button
             type="button"
             role="tab"
+            aria-selected={tab === 'graph'}
+            onClick={() => setTab('graph')}
+          >
+            Graph
+          </button>
+          <button
+            type="button"
+            role="tab"
             aria-selected={tab === 'health'}
             onClick={() => setTab('health')}
           >
@@ -337,6 +346,8 @@ export function App() {
             ) : (
               <Overview index={index} onOpenHealth={() => setTab('health')} timing={timing} />
             ))}
+
+          {tab === 'graph' && <GraphView index={index} onSelect={showPreset} />}
 
           {tab === 'health' && (
             <HealthReport index={index} onSelect={showPreset} onCompare={showCompare} />

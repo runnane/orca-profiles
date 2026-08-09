@@ -471,6 +471,31 @@ function loadRank(p: Preset): number {
   return p.origin === 'system' ? 0 : p.isCustomRoot ? 1 : 2;
 }
 
+/**
+ * Every preset the slicer never loads because another file claimed its name
+ * first.
+ *
+ * Grouped the way the slicer's collections are — the system bundles plus one user
+ * folder — so a name existing in two *profiles* is not a clash, and a name
+ * claimed twice inside one is. Everything after the first in load order is a file
+ * on disk with no effect on anything, which is why callers exclude these before
+ * saying anything else about them: telling someone a dead file is a detached copy
+ * sends them to fix a file the slicer has never read.
+ */
+export function shadowedIds(index: ConfigIndex): Set<string> {
+  const out = new Set<string>();
+  const groups = new Map<string, Preset[]>();
+  for (const p of index.active) {
+    const k = `${p.origin}:${p.profile ?? p.vendor ?? ''}:${p.kind}:${p.name}`;
+    groups.set(k, [...(groups.get(k) ?? []), p]);
+  }
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    for (const loser of loadOrder(group).slice(1)) out.add(loser.id);
+  }
+  return out;
+}
+
 /** True when the top two candidates share a rank, so which one wins is luck. */
 export function tieIsArbitrary(presets: Preset[]): boolean {
   const ordered = loadOrder(presets);

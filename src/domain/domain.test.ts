@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyze, stats } from './analyze';
 import { diffEffective, diffRaw } from './diff';
+import { buildGraph } from './graph';
 import {
   buildIndex,
   classifyReference,
@@ -547,6 +548,130 @@ describe('dead files', () => {
   it('disambiguates titles when a name is claimed more than once', () => {
     const titles = findings.filter((f) => f.kind === 'detached').map((f) => f.title);
     expect(new Set(titles).size).toBe(titles.length);
+  });
+});
+
+describe('inheritance graph', () => {
+  const g = buildGraph(index);
+  const node = (file: string) => {
+    const n = g.nodes.find((x) => x.id.endsWith(file));
+    if (!n) throw new Error(`not in the graph: ${file}`);
+    return n;
+  };
+  const edgeFrom = (file: string) => g.edges.find((e) => e.childId.endsWith(file));
+
+  it('holds every user preset and only the system presets they inherit from', () => {
+    // The scale rule: a real config is a user folder plus a few thousand vendor
+    // presets, so the default view is the part that is yours plus its ancestry.
+    const user = index.active.filter((p) => p.origin === 'user');
+    for (const p of user) expect(g.nodes.some((n) => n.id === p.id)).toBe(true);
+    const system = g.nodes.filter((n) => n.origin === 'system');
+    expect(system.length).toBeGreaterThan(0);
+    expect(system.length).toBeLessThan(index.active.filter((p) => p.origin === 'system').length);
+    expect(g.omitted.systemOnly).toBeGreaterThan(0);
+    // Nothing the slicer does not load, unless asked for.
+    expect(g.nodes.every((n) => n.scope === 'active')).toBe(true);
+    expect(g.omitted.snapshots).toBeGreaterThan(0);
+  });
+
+  it('gives every node exactly one edge per `inherits` it declares', () => {
+    const withParent = g.nodes.filter((n) => index.byId.get(n.id)?.inherits);
+    expect(g.edges).toHaveLength(withParent.length);
+    expect(new Set(g.edges.map((e) => e.childId)).size).toBe(g.edges.length);
+  });
+
+  it('draws the edge at the file load order actually picks', () => {
+    // Two files claim "Studio Base"; `base/` is loaded first (Preset.cpp:1583),
+    // so the child's parent is that one. This is the assertion that fails if the
+    // graph ever matches names itself instead of asking `lookupParent`.
+    const e = edgeFrom('Studio Base Fine.json');
+    expect(e?.resolved).toBe(true);
+    expect(e?.parentId).toBe('user/default/process/base/Studio Base.json');
+    expect(e?.ambiguous).toBe(true);
+    // And the file that lost is in the graph, marked dead rather than omitted.
+    expect(node('user/default/process/Studio Base.json').shadowed).toBe(true);
+    expect(node('process/base/Studio Base.json').shadowed).toBe(false);
+  });
+
+  it('draws a loop as a marked back edge instead of following it', () => {
+    const a = edgeFrom('Loop A.json');
+    const b = edgeFrom('Loop B.json');
+    expect(a?.back).toBe(true);
+    expect(b?.back).toBe(true);
+    // Both presets are still in the graph: dropping them would hide the fault.
+    expect(node('Loop A.json')).toBeDefined();
+    expect(node('Loop B.json')).toBeDefined();
+    // …and the walk terminated, which is the whole reason for the visited set.
+    expect(new Set(g.nodes.map((n) => n.id)).size).toBe(g.nodes.length);
+  });
+
+  it('marks an ordinary edge as neither back nor ambiguous', () => {
+    // The failing direction for the two flags above: if either is computed
+    // wrongly, a config with no loop and no clash lights up everywhere.
+    const e = edgeFrom('user/default/filament/Studio ABS.json');
+    expect(e).toMatchObject({ resolved: true, back: false, ambiguous: false });
+  });
+
+  it('says why an edge did not resolve', () => {
+    expect(edgeFrom('Orphaned Profile.json')).toMatchObject({
+      resolved: false,
+      reason: 'absent',
+      parentId: undefined,
+    });
+  });
+
+  it('measures a root by what it carries', () => {
+    // "Which vendor base is carrying most of my presets" — the question a list of
+    // chains cannot answer.
+    const root = node('system/Acme/process/fdm_process_common.json');
+    expect(root.depth).toBe(0);
+    expect(root.subtreeSize).toBeGreaterThan(3);
+    expect(g.roots).toContain(root.id);
+    const leaf = node('0.28mm Draft @Acme - Copy.json');
+    expect(leaf.depth).toBe(4);
+    expect(leaf.rootId).toBe(root.id);
+    expect(leaf.subtreeSize).toBe(1);
+  });
+
+  it('orders nodes depth-first so a parent always precedes its children', () => {
+    const at = new Map(g.nodes.map((n, i) => [n.id, i]));
+    for (const e of g.edges) {
+      if (!e.parentId || e.back) continue;
+      expect(at.get(e.parentId)!).toBeLessThan(at.get(e.childId)!);
+    }
+  });
+
+  it('separates a detached copy from one rooted in a vendor preset', () => {
+    // A detached full copy is its own root — that *is* the finding, drawn.
+    const detached = node('user/default/process/Fast Draft.json');
+    expect(detached.rootId).toBe(detached.id);
+    // A detached copy changes nothing — it has no parent to change — but it does
+    // set everything, and reporting that as "0 overrides" read as "sets nothing".
+    expect(detached.changed).toBe(0);
+    expect(detached.novel).toBeGreaterThan(100);
+    expect(detached.settings).toBeGreaterThan(100);
+    const rooted = node('user/default/filament/Studio ABS.json');
+    expect(rooted.rootId).not.toBe(rooted.id);
+    expect(rooted.changed).toBeGreaterThan(0);
+    expect(rooted.novel).toBeGreaterThan(0);
+  });
+
+  it('brings in the profiles the slicer ignores only when asked', () => {
+    const wide = buildGraph(index, { includeInactive: true, includeSystemOnly: true });
+    expect(wide.nodes.length).toBeGreaterThan(g.nodes.length);
+    expect(wide.nodes.some((n) => n.scope === 'inactive-profile')).toBe(true);
+    expect(wide.omitted.systemOnly).toBe(0);
+    // A snapshot is never drawn, at any setting: the slicer never loads one.
+    expect(wide.nodes.every((n) => n.scope !== 'snapshot')).toBe(true);
+  });
+
+  it('filters by kind without stranding an ancestor', () => {
+    const filaments = buildGraph(index, { kinds: ['filament'] });
+    expect(filaments.nodes.every((n) => n.kind === 'filament')).toBe(true);
+    for (const e of filaments.edges) {
+      if (!e.parentId) continue;
+      expect(filaments.nodes.some((n) => n.id === e.parentId)).toBe(true);
+    }
   });
 });
 

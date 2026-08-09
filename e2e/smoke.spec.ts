@@ -28,6 +28,19 @@ test('loads a config and walks every tab without console errors', async ({ page 
   await expect(page.locator('.finding').first()).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/4-health.png` });
 
+  await page.getByRole('tab', { name: 'Graph' }).click();
+  // The graph is navigation, not a picture: a node has to be reachable by keyboard
+  // and opening one has to land in the preset it names.
+  await expect(page.getByRole('tree', { name: 'Inheritance forest' })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/5-graph.png`, fullPage: true });
+  await page.getByRole('treeitem').last().scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${SHOTS}/6-graph-bottom.png` });
+  const firstNode = page.getByRole('treeitem').first();
+  await firstNode.focus();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('main h2').first()).toBeVisible();
+
   await page.getByRole('tab', { name: 'Presets' }).click();
   // A name the generated fixture actually has, and the one this screenshot is
   // named after: `Fast Draft` is the detached full copy, claimed by two files.
