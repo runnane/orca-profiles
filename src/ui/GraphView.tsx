@@ -138,9 +138,10 @@ export function GraphView({
     [focusRow, graph.nodes, rowOf],
   );
 
-  if (graph.nodes.length === 0) {
-    return <div className="notice">Nothing to draw with these filters.</div>;
-  }
+  // The empty state goes where the diagram would be, never in place of the whole
+  // view: a notice that blames "these filters" while unmounting the filters tells
+  // you what happened and takes away the means to undo it.
+  const empty = graph.nodes.length === 0;
 
   return (
     <div>
@@ -181,85 +182,116 @@ export function GraphView({
         )}
       </div>
 
-      <p className="muted" style={{ margin: '0 0 10px' }}>
-        {graph.nodes.length} preset{graph.nodes.length === 1 ? '' : 's'} in {graph.roots.length}{' '}
-        tree{graph.roots.length === 1 ? '' : 's'}, {maxDepth + 1} deep. Edges point from a preset to
-        the parent <strong>OrcaSlicer would load</strong> — where two files claim one name, that is
-        the one that wins.
-        {graph.omitted.snapshots > 0 && ` ${graph.omitted.snapshots} sync snapshots are never drawn.`}
-      </p>
+      {empty ? (
+        kinds.size === 0 ? (
+          <div className="notice">
+            <strong>No kinds selected.</strong> Nothing can be drawn until at least one of{' '}
+            <em>filament</em>, <em>process</em> or <em>machine</em> is on.{' '}
+            <button type="button" className="chip" onClick={() => setKinds(new Set(KINDS))}>
+              Show all three kinds
+            </button>
+          </div>
+        ) : (
+          <div className="notice">
+            <strong>No presets match these filters.</strong> Nothing of the selected kind
+            {kinds.size === 1 ? '' : 's'} survives the two include-toggles above.{' '}
+            <button
+              type="button"
+              className="chip"
+              onClick={() => {
+                setKinds(new Set(KINDS));
+                setIncludeSystemOnly(true);
+                setIncludeInactive(true);
+              }}
+            >
+              Show everything
+            </button>
+          </div>
+        )
+      ) : (
+        <>
+          <p className="muted" style={{ margin: '0 0 10px' }}>
+            {graph.nodes.length} preset{graph.nodes.length === 1 ? '' : 's'} in{' '}
+            {graph.roots.length} tree{graph.roots.length === 1 ? '' : 's'}, {maxDepth + 1} deep.
+            Edges point from a preset to the parent <strong>OrcaSlicer would load</strong> — where
+            two files claim one name, that is the one that wins.
+            {graph.omitted.snapshots > 0 &&
+              ` ${graph.omitted.snapshots} sync snapshots are never drawn.`}
+          </p>
 
-      <details className="graph-help">
-        <summary>What these labels mean</summary>
-        <dl>
-          {Object.entries(BADGE_HELP).map(([label, help]) => (
-            <div key={label}>
-              <dt>{label}</dt>
-              <dd>
-                <CodeText text={help} />
-              </dd>
+          <details className="graph-help">
+            <summary>What these labels mean</summary>
+            <dl>
+              {Object.entries(BADGE_HELP).map(([label, help]) => (
+                <div key={label}>
+                  <dt>{label}</dt>
+                  <dd>
+                    <CodeText text={help} />
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </details>
+
+          <div className="graph-legend" aria-hidden="true">
+            <span>
+              <i className="swatch system" /> system
+            </span>
+            <span>
+              <i className="swatch user" /> yours
+            </span>
+            <span>
+              <i className="swatch danger" /> never loaded / unresolved
+            </span>
+            <span>
+              <i className="swatch warn" /> loop
+            </span>
+          </div>
+
+          <div className="graph" style={{ height: graph.nodes.length * ROW }}>
+            <svg
+              className="graph-edges"
+              width={(maxDepth + 1) * INDENT + 40}
+              height={graph.nodes.length * ROW}
+              aria-hidden="true"
+            >
+              {graph.edges.map((e) => {
+                const child = rowOf.get(e.childId);
+                const parent = e.parentId ? rowOf.get(e.parentId) : undefined;
+                if (child === undefined || parent === undefined) return null;
+                const cd = graph.nodes[child].depth;
+                const pd = graph.nodes[parent].depth;
+                const x1 = pd * INDENT + 9;
+                const y1 = parent * ROW + ROW / 2;
+                const x2 = cd * INDENT + 3;
+                const y2 = child * ROW + ROW / 2;
+                return (
+                  <path
+                    key={`${e.childId}->${e.parentId}`}
+                    d={`M ${x1} ${y1} V ${y2} H ${x2}`}
+                    className={`edge${e.back ? ' back' : ''}${e.ambiguous ? ' ambiguous' : ''}`}
+                  />
+                );
+              })}
+            </svg>
+
+            <div className="graph-rows" role="tree" aria-label="Inheritance forest" ref={listRef}>
+              {graph.nodes.map((n, i) => (
+                <Row
+                  key={n.id}
+                  node={n}
+                  edge={edgeByChild.get(n.id)}
+                  row={i}
+                  tabbable={i === Math.min(active, graph.nodes.length - 1)}
+                  onKeyDown={(e) => onKeyDown(e, i, n)}
+                  onOpen={() => onSelect(n.id)}
+                  onFocus={() => setActive(i)}
+                />
+              ))}
             </div>
-          ))}
-        </dl>
-      </details>
-
-      <div className="graph-legend" aria-hidden="true">
-        <span>
-          <i className="swatch system" /> system
-        </span>
-        <span>
-          <i className="swatch user" /> yours
-        </span>
-        <span>
-          <i className="swatch danger" /> never loaded / unresolved
-        </span>
-        <span>
-          <i className="swatch warn" /> loop
-        </span>
-      </div>
-
-      <div className="graph" style={{ height: graph.nodes.length * ROW }}>
-        <svg
-          className="graph-edges"
-          width={(maxDepth + 1) * INDENT + 40}
-          height={graph.nodes.length * ROW}
-          aria-hidden="true"
-        >
-          {graph.edges.map((e) => {
-            const child = rowOf.get(e.childId);
-            const parent = e.parentId ? rowOf.get(e.parentId) : undefined;
-            if (child === undefined || parent === undefined) return null;
-            const cd = graph.nodes[child].depth;
-            const pd = graph.nodes[parent].depth;
-            const x1 = pd * INDENT + 9;
-            const y1 = parent * ROW + ROW / 2;
-            const x2 = cd * INDENT + 3;
-            const y2 = child * ROW + ROW / 2;
-            return (
-              <path
-                key={`${e.childId}->${e.parentId}`}
-                d={`M ${x1} ${y1} V ${y2} H ${x2}`}
-                className={`edge${e.back ? ' back' : ''}${e.ambiguous ? ' ambiguous' : ''}`}
-              />
-            );
-          })}
-        </svg>
-
-        <div className="graph-rows" role="tree" aria-label="Inheritance forest" ref={listRef}>
-          {graph.nodes.map((n, i) => (
-            <Row
-              key={n.id}
-              node={n}
-              edge={edgeByChild.get(n.id)}
-              row={i}
-              tabbable={i === Math.min(active, graph.nodes.length - 1)}
-              onKeyDown={(e) => onKeyDown(e, i, n)}
-              onOpen={() => onSelect(n.id)}
-              onFocus={() => setActive(i)}
-            />
-          ))}
-        </div>
-      </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
