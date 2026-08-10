@@ -571,7 +571,7 @@ writeUser('user/default/filament/Studio PLA Opaque.json', {
 // report 47 filaments where the slicer offered 18: "Save as" from a vendor
 // filament writes the overrides and nothing else, so the file mentions no
 // printers at all while the preset is pinned to one.
-write('user/default/filament/Studio ABS From Cube6.json', {
+writeUser('user/default/filament/Studio ABS From Cube6.json', {
   name: 'Studio ABS From Cube6',
   from: 'User',
   inherits: 'Acme ABS @Cube6',
@@ -583,7 +583,7 @@ write('user/default/filament/Studio ABS From Cube6.json', {
 // really is compatible with everything, and it is the failing direction for
 // "present counts as stated": read it as absent and it falls through to the
 // parent's list, which is the opposite answer.
-write('user/default/filament/Studio ABS Unpinned.json', {
+writeUser('user/default/filament/Studio ABS Unpinned.json', {
   name: 'Studio ABS Unpinned',
   from: 'User',
   inherits: 'Acme ABS @Cube6',
@@ -594,7 +594,7 @@ write('user/default/filament/Studio ABS Unpinned.json', {
 // An inherited *condition*. `compatible_printers_condition()` is a config
 // accessor (Preset.hpp:347), so this child is judged by an expression it does not
 // contain — and one that is false for the Acme Cube.
-write('user/default/filament/Studio PLA From Globex.json', {
+writeUser('user/default/filament/Studio PLA From Globex.json', {
   name: 'Studio PLA From Globex',
   from: 'User',
   inherits: 'Acme PLA @Globex',
@@ -603,7 +603,7 @@ write('user/default/filament/Studio PLA From Globex.json', {
 
 // An inherited process gate, so the second relation has to be read off the chain
 // as well.
-write('user/default/filament/Studio PLA From Fine.json', {
+writeUser('user/default/filament/Studio PLA From Fine.json', {
   name: 'Studio PLA From Fine',
   from: 'User',
   inherits: 'Acme PLA @Fine',
