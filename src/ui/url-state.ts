@@ -43,6 +43,7 @@ const FINDING_KINDS: Record<Finding['kind'], true> = {
   'redundant-overrides': true,
   'near-duplicate': true,
   'broken-parent': true,
+  'not-loaded': true,
   'circular-inherits': true,
   'orphaned-printer': true,
   'missing-reference': true,
