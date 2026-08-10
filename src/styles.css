@@ -422,6 +422,52 @@ td.src { width: 26%; font-size: 11px; color: var(--ink-muted); }
 .compat-row.not-installed { border-left-color: var(--border-strong); }
 .compat-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .compat-head .cname { font-weight: 600; }
+/* The preset's own name beside the alias the slicer shows. Quieter than the
+   label but not faint: it is what tells two presets sharing an alias apart. */
+.compat-head .calias { color: var(--ink-muted); font-size: 11px; }
+
+/* printer view — the dropdown's own sections: User / System (by filament vendor)
+   / Unsupported, then the two groups that are ours. See grouping.ts. */
+.preset-group { margin: 10px 0 0; }
+.preset-group > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  padding: 5px 2px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+.preset-group > summary:hover { color: var(--ink); }
+.preset-group > summary .count { font-weight: 400; }
+/* A flex `summary` drops the default disclosure triangle in Chromium, and a
+   group you cannot see is collapsible is a group nobody opens — the uninstalled
+   one starts closed and holds a thousand rows. So the marker is drawn back on
+   explicitly, and `list-style: none` keeps the two engines from disagreeing. */
+.preset-group > summary { list-style: none; }
+.preset-group > summary::-webkit-details-marker { display: none; }
+.preset-group > summary::before {
+  content: '';
+  align-self: center;
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+}
+.preset-group[open] > summary::before { transform: rotate(90deg); }
+.preset-group.ours > summary .pg-title { color: var(--ink-muted); font-style: italic; }
+.preset-subgroup { margin: 8px 0 0; }
+.pg-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 8px 0 5px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
+}
 .compat-why { color: var(--ink-muted); }
 .compat-expr {
   color: var(--ink);

@@ -185,6 +185,28 @@ nothing about what is installed, and hiding presets on the strength of our own
 ignorance would be inventing an answer. The app says so instead, and the lists
 stay wide.
 
+### Reading it against the dropdown
+
+The Printer tab lays the result out the way OrcaSlicer's own filament combo box
+does, because a list you cannot check against the slicer is a list you have to
+take on trust: `User presets`, `System presets` — sub-grouped by
+`filament_vendor`, which is the `Generic >` submenu — then `Unsupported presets`
+([PresetComboBoxes.cpp:1421](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/slic3r/GUI/PresetComboBoxes.cpp#L1421)).
+Rows carry the **alias** the dropdown shows (`Generic PLA`, not
+`Generic PLA @System`) with the preset's own name beside it, and the row order
+copies the combo box's sort, hardcoded lists and all — which is why a `Generic`
+submenu opens PLA, PETG, ABS, TPU rather than alphabetically.
+
+Two groups are this app's own and are labelled as such: **not installed**, which
+the slicer simply omits, and **undetermined**, which it never produces because it
+evaluates every condition. Folding either into `Unsupported` would be claiming
+the slicer hides them.
+
+One thing that cannot be reproduced: the `*` prefix on a preset with unsaved
+edits. `Preset::label` adds it when `is_dirty`, which means "changed in the
+slicer and not yet written" — that state is in memory, never on disk, so no
+config reader can know it.
+
 ### Gate 2: compatible
 
 **Every key below is read off the resolved inheritance chain, not off the file.**

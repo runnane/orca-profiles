@@ -29,6 +29,7 @@ import {
   shadowedIds,
   type ConfigIndex,
 } from './index-config';
+import { groupLikeSlicer, presetAlias } from './grouping';
 import { readInstalled } from './installed';
 import { loadConfigDir } from './load-fixtures';
 import { parseQuotedList, scalarAsList, valuesEqual } from './normalize';
@@ -1787,5 +1788,142 @@ describe('active profile is read from OrcaSlicer.conf', () => {
         preset('user/default/process/a.json', 'a'),
       ]).activeProfile,
     ).toBe('default');
+  });
+});
+
+describe('the dropdown’s own grouping', () => {
+  // Modelled on `PlaterPresetComboBox::update` (v2.4.2 PresetComboBoxes.cpp), so
+  // that the two lists can be read side by side rather than reconciled by eye.
+  const machine = byFile('user/default/machine/Workshop Cube.json');
+  const c = compatibilityFor(index, machine);
+  const groups = groupLikeSlicer(index, c.filaments);
+  const titled = (g: string) => groups.find((x) => x.group === g);
+
+  it('emits the slicer’s sections, in the slicer’s order and words', () => {
+    // `User presets`, `System presets`, `Unsupported presets` (:1421-1430), then
+    // the two this app adds.
+    expect(groups.map((g) => g.group)).toEqual([
+      'user',
+      'system',
+      'unsupported',
+      'undetermined',
+      'not-installed',
+    ]);
+    expect(groups.slice(0, 3).map((g) => g.title)).toEqual([
+      'User presets',
+      'System presets',
+      'Unsupported presets',
+    ]);
+  });
+
+  it('marks the two groups the slicer does not have', () => {
+    // Neither exists in the dropdown: a condition it cannot evaluate does not
+    // arise, and an uninstalled preset is simply absent. Presenting either as one
+    // of the slicer's sections would be claiming it hides them.
+    expect(groups.filter((g) => g.ours).map((g) => g.group)).toEqual([
+      'undetermined',
+      'not-installed',
+    ]);
+  });
+
+  it('sub-groups system filaments by filament_vendor, and only those', () => {
+    expect(titled('system')?.subgroups.map((s) => s.title)).toEqual(['Acme', 'Unspecified']);
+    // `groupByGroup` is false for exactly the system group (:1324); every other
+    // group renders as one list.
+    for (const g of groups.filter((x) => x.group !== 'system')) {
+      expect(g.subgroups.map((s) => s.title)).toEqual(['']);
+    }
+  });
+
+  it('never sub-groups processes, whose vendor and type are empty', () => {
+    // The by-vendor grouping reads filament-only attributes (:1418-1422), so
+    // applying it here would bucket every process under "Unspecified".
+    for (const g of groupLikeSlicer(index, c.processes)) {
+      expect(g.subgroups.map((s) => s.title)).toEqual(['']);
+    }
+  });
+
+  it('labels a row with its alias, as the plater combo does', () => {
+    // `Preset::label(false)` = alias when there is one (:1098-1100).
+    const rows = groups.flatMap((g) => g.subgroups.flatMap((s) => s.items));
+    const stated = rows.find((r) => r.name === 'Acme PLA-CF @Cube');
+    expect(stated?.label).toBe('Acme PLA-CF');
+    // Derived, because that preset states no alias: the name up to the `@`,
+    // right-trimmed (PresetBundle.cpp:5086-5099).
+    expect(rows.find((r) => r.name === 'Acme PETG @Cube')?.label).toBe('Acme PETG');
+    // No `@` at all: the alias is the whole name.
+    expect(rows.find((r) => r.name === 'Studio ABS')?.label).toBe('Studio ABS');
+  });
+
+  it('does not confuse the alias derivation with the renamed_from one', () => {
+    // One character apart and easy to implement once by accident: the alias is
+    // right-trimmed (`boost::trim_right`), the `renamed_from` name keeps the
+    // space because it is concatenated before the trim. `Acme PETG @Cube` is
+    // therefore alias "Acme PETG" and old name "Acme PETG Cube".
+    const p = byFile('system/Acme/filament/Acme PETG @Cube.json');
+    expect(presetAlias(index, p)).toBe('Acme PETG');
+    expect(index.installed.filaments.has('Acme PETG Cube')).toBe(true);
+  });
+});
+
+describe('the dropdown’s row order', () => {
+  const files = (names: { name: string; vendor?: string; type?: string }[]) => [
+    { path: 'OrcaSlicer.conf', text: JSON.stringify({ filaments: names.map((n) => n.name), models: [] }) },
+    { path: 'user/default/machine/m.json', text: JSON.stringify({ name: 'Mine' }) },
+    ...names.map((n, i) => ({
+      path: `system/V/filament/f${i}.json`,
+      text: JSON.stringify({
+        name: n.name,
+        ...(n.vendor === undefined ? {} : { filament_vendor: n.vendor }),
+        ...(n.type === undefined ? {} : { filament_type: n.type }),
+      }),
+    })),
+  ];
+  const order = (names: { name: string; vendor?: string; type?: string }[], group = 'system') => {
+    const built = buildIndex(files(names));
+    const m = built.presets.find((p) => p.name === 'Mine')!;
+    const g = groupLikeSlicer(built, compatibilityFor(built, m).filaments).find((x) => x.group === group)!;
+    return g.subgroups.flatMap((s) => s.items).map((i) => i.name);
+  };
+
+  it('puts PLA, PETG, ABS and TPU first, then falls back to the name', () => {
+    // `first_types` (:1316), which is why a real `Generic` submenu reads PLA,
+    // PETG, ABS, TPU, then ASA, PA, PA-CF… Sorted alphabetically it would open
+    // with ABS, and the two lists stop lining up row for row.
+    expect(
+      order([
+        { name: 'G ASA', vendor: 'Generic', type: 'ASA' },
+        { name: 'G ABS', vendor: 'Generic', type: 'ABS' },
+        { name: 'G PLA', vendor: 'Generic', type: 'PLA' },
+        { name: 'G PVA', vendor: 'Generic', type: 'PVA' },
+        { name: 'G PETG', vendor: 'Generic', type: 'PETG' },
+      ]),
+    ).toEqual(['G PLA', 'G PETG', 'G ABS', 'G ASA', 'G PVA']);
+  });
+
+  it('orders the vendor submenus with Bambu and Generic first', () => {
+    // `first_vendors` (:1315).
+    const built = buildIndex(
+      files([
+        { name: 'A one', vendor: 'Acme', type: 'PLA' },
+        { name: 'B one', vendor: 'Generic', type: 'PLA' },
+        { name: 'C one', vendor: 'Bambu Lab', type: 'PLA' },
+      ]),
+    );
+    const m = built.presets.find((p) => p.name === 'Mine')!;
+    const sys = groupLikeSlicer(built, compatibilityFor(built, m).filaments).find(
+      (x) => x.group === 'system',
+    )!;
+    // And "Bambu Lab" is rewritten to "Bambu" (:1223-1224) — the submenu is
+    // labelled with the short name, so matching on the raw value finds nothing.
+    expect(sys.subgroups.map((s) => s.title)).toEqual(['Bambu', 'Generic', 'Acme']);
+  });
+
+  it('sorts by bytes, not by locale, so two spellings of one name stay apart', () => {
+    // The comparator ends in `std::string <`. `localeCompare` orders "jon PLA"
+    // before "Jon PLA"; the slicer does the opposite, and a config holding both
+    // is exactly the one someone is trying to make sense of.
+    expect(order([{ name: 'jon PLA' }, { name: 'Jon PLA' }])).toEqual(['Jon PLA', 'jon PLA']);
+    expect(['jon PLA', 'Jon PLA'].sort((a, b) => a.localeCompare(b, 'en'))[0]).toBe('jon PLA');
   });
 });
