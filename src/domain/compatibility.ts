@@ -100,7 +100,7 @@ import { evaluateCondition, printerInjectedVars, type ConditionContext } from '.
 import { shadowedIds, type ConfigIndex } from './index-config';
 import { hasVariant } from './installed';
 import { referenceNames } from './references';
-import { resolve } from './resolve';
+import { chainLookup, resolve, type ChainValue } from './resolve';
 import type { Preset, RawValue, ResolvedSetting } from './types';
 
 /** The vendor whose filaments carry the derived exclusion list. */
@@ -126,6 +126,13 @@ export type CompatibilityReason =
 export interface CompatibilityEvidence {
   key: string;
   value: string;
+  /**
+   * The preset that actually states the key, when it is not the preset being
+   * judged. A user filament saved from a vendor one carries the vendor's gate
+   * without stating it, so this is the file you would open to change the answer —
+   * and without it the verdict looks like it came from nowhere.
+   */
+  from?: string;
 }
 
 /** Why a preset is or is not installed. */
@@ -196,6 +203,8 @@ export interface Compatibility {
     names: string[];
     /** The `compatible_prints_condition`, when the list is empty. */
     condition?: string;
+    /** The preset that states the gate, when an ancestor does. */
+    from?: string;
     /** Set when a process was supplied: does this filament pass for it? */
     passes?: boolean | 'undetermined';
   };
@@ -252,30 +261,59 @@ export interface CompatibilityOptions {
 function libraryExclusions(index: ConfigIndex): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>();
   const byAlias = new Map<string, string[]>();
-  const aliasOf = (p: Preset) => (typeof p.raw.alias === 'string' ? p.raw.alias : '');
+  // Both loops in the source read `preset.config.option("compatible_printers")`
+  // and `preset.alias`, so both are effective values rather than stated ones.
+  const aliasOf = (look: ChainLook) => {
+    const v = look('alias')?.value;
+    return typeof v === 'string' ? v : '';
+  };
 
   // Two passes, because within a directory the order files are read in is
   // filesystem-dependent — a one-pass version would give different exclusions on
   // different machines.
   for (const p of index.active) {
     if (p.kind !== 'filament' || p.vendor !== FILAMENT_LIBRARY) continue;
-    const alias = aliasOf(p);
-    if (alias === '' || referenceNames(p.raw, 'compatible_printers').length > 0) continue;
+    const look = chainLookup(index, p);
+    const alias = aliasOf(look);
+    if (alias === '' || gateNames(look, 'compatible_printers').length > 0) continue;
     out.set(p.id, new Set());
     byAlias.set(alias, [...(byAlias.get(alias) ?? []), p.id]);
   }
 
   for (const p of index.active) {
     if (p.kind !== 'filament' || p.vendor === FILAMENT_LIBRARY) continue;
-    const claims = referenceNames(p.raw, 'compatible_printers');
+    const look = chainLookup(index, p);
+    const claims = gateNames(look, 'compatible_printers');
     if (claims.length === 0) continue;
-    for (const libraryId of byAlias.get(aliasOf(p)) ?? []) {
+    for (const libraryId of byAlias.get(aliasOf(look)) ?? []) {
       const set = out.get(libraryId);
       for (const name of claims) set?.add(name);
     }
   }
 
   return out;
+}
+
+/** A reader over one preset's inheritance chain — see `chainLookup`. */
+type ChainLook = (key: string) => ChainValue | undefined;
+
+/**
+ * A name list as the slicer sees it: the effective value, not the stated one.
+ *
+ * `referenceNames` handles both serialisations; this adds the chain walk, which is
+ * the difference between reading a preset and reading a *file*. A user filament
+ * saved from `Creality Generic PETG @ender3` states no `compatible_printers` and
+ * has one all the same.
+ */
+function gateNames(look: ChainLook, key: string): string[] {
+  const found = look(key);
+  return found ? referenceNames({ [key]: found.value }, key) : [];
+}
+
+/** Where a value came from, when an ancestor supplied it. */
+function sourceOf(look: ChainLook, key: string): string | undefined {
+  const found = look(key);
+  return found?.inherited ? found.source.name : undefined;
 }
 
 /**
@@ -414,7 +452,7 @@ function seededFilaments(index: ConfigIndex, exclusions: Map<string, Set<string>
     const ctx = printerContext(settings, machine.name);
     const anyInstalledFits = [...index.installed.filaments].some((name) =>
       activeNamed(name, 'filament').some(
-        (f) => judgePrinter(f, machine, exclusions, ctx).included !== false,
+        (f) => judgePrinter(f, chainLookup(index, f), machine, exclusions, ctx).included !== false,
       ),
     );
     if (anyInstalledFits) continue;
@@ -522,8 +560,12 @@ export function compatibilityFor(
   const machineSettings = resolve(index, machine).settings;
   const printerCtx = printerContext(machineSettings, machine.name);
 
-  const defaultProcesses = new Set(referenceNames(machine.raw, 'default_print_profile'));
-  const defaultFilaments = new Set(referenceNames(machine.raw, 'default_filament_profile'));
+  // Also off the chain: `PresetBundle` reads these from the printer's config
+  // (PresetBundle.cpp:2142-2166), and a user printer inherits them from the vendor
+  // preset it was saved from without restating either.
+  const machineLook = chainLookup(index, machine);
+  const defaultProcesses = new Set(gateNames(machineLook, 'default_print_profile'));
+  const defaultFilaments = new Set(gateNames(machineLook, 'default_filament_profile'));
 
   const judge = (p: Preset): Compatibility => {
     const isDefault =
@@ -533,6 +575,9 @@ export function compatibilityFor(
       isPrinterDefault: isDefault,
       visibility: visibility.get(p.id) ?? NOT_GATED,
     };
+    // One chain walk per preset, shared by both gates: everything below reads the
+    // preset's *effective* keys, which is what the slicer's `preset.config` holds.
+    const look = chainLookup(index, p);
 
     if (dead.has(p.id) || p.scope !== 'active') {
       return {
@@ -540,12 +585,12 @@ export function compatibilityFor(
         included: false,
         reason: 'never-loaded',
         evidence: { key: 'name', value: p.name },
-        ...(p.kind === 'filament' ? { processGate: gateOf(p) } : {}),
+        ...(p.kind === 'filament' ? { processGate: gateOf(look) } : {}),
       };
     }
 
-    const gate = p.kind === 'filament' ? gateOf(p) : undefined;
-    const verdict = judgePrinter(p, machine, exclusions, printerCtx);
+    const gate = p.kind === 'filament' ? gateOf(look) : undefined;
+    const verdict = judgePrinter(p, look, machine, exclusions, printerCtx);
     const out: Compatibility = { ...base, ...verdict, ...(gate ? { processGate: gate } : {}) };
 
     if (gate && opts.process) {
@@ -577,6 +622,7 @@ export function compatibilityFor(
 
 function judgePrinter(
   p: Preset,
+  look: ChainLook,
   machine: Preset,
   exclusions: Map<string, Set<string>>,
   printerCtx: ConditionContext,
@@ -584,25 +630,27 @@ function judgePrinter(
   // 1. The library exclusion, which is checked first and by itself.
   const excluded = exclusions.get(p.id);
   if (excluded && (excluded.has(machine.name) || (machine.inherits && excluded.has(machine.inherits)))) {
+    const alias = look('alias')?.value;
     return {
       included: false,
       reason: 'excluded-by-library',
       evidence: {
         key: 'alias',
-        value: typeof p.raw.alias === 'string' ? p.raw.alias : p.name,
+        value: typeof alias === 'string' ? alias : p.name,
       },
     };
   }
 
-  const names = referenceNames(p.raw, 'compatible_printers');
-  const condition = conditionOf(p, 'compatible_printers_condition');
+  const names = gateNames(look, 'compatible_printers');
+  const condition = conditionOf(look, 'compatible_printers_condition');
+  const from = sourceOf(look, names.length === 0 ? 'compatible_printers_condition' : 'compatible_printers');
 
   // 2. Empty list plus a condition: the condition is the whole answer.
   if (names.length === 0 && condition) {
     return {
       included: evaluateCondition(condition, printerCtx),
       reason: 'condition',
-      evidence: { key: 'compatible_printers_condition', value: condition },
+      evidence: { key: 'compatible_printers_condition', value: condition, from },
     };
   }
 
@@ -611,7 +659,7 @@ function judgePrinter(
     return {
       included: true,
       reason: 'compatible-with-everything',
-      evidence: { key: 'compatible_printers', value: '' },
+      evidence: { key: 'compatible_printers', value: '', from },
     };
   }
 
@@ -619,7 +667,7 @@ function judgePrinter(
     return {
       included: true,
       reason: 'named-explicitly',
-      evidence: { key: 'compatible_printers', value: machine.name },
+      evidence: { key: 'compatible_printers', value: machine.name, from },
     };
   }
 
@@ -629,23 +677,27 @@ function judgePrinter(
     return {
       included: true,
       reason: 'named-via-parent',
-      evidence: { key: 'compatible_printers', value: machine.inherits },
+      evidence: { key: 'compatible_printers', value: machine.inherits, from },
     };
   }
 
   return {
     included: false,
     reason: 'excluded',
-    evidence: { key: 'compatible_printers', value: names.join(', ') },
+    evidence: { key: 'compatible_printers', value: names.join(', '), from },
   };
 }
 
-/** The filament's process gate, if it carries one. */
-function gateOf(p: Preset): Compatibility['processGate'] {
-  const names = referenceNames(p.raw, 'compatible_prints');
-  const condition = conditionOf(p, 'compatible_prints_condition');
+/** The filament's process gate, if it carries one — inherited or not. */
+function gateOf(look: ChainLook): Compatibility['processGate'] {
+  const names = gateNames(look, 'compatible_prints');
+  const condition = conditionOf(look, 'compatible_prints_condition');
   if (names.length === 0 && !condition) return undefined;
-  return { names, ...(names.length === 0 && condition ? { condition } : {}) };
+  return {
+    names,
+    ...(names.length === 0 && condition ? { condition } : {}),
+    from: sourceOf(look, names.length === 0 ? 'compatible_prints_condition' : 'compatible_prints'),
+  };
 }
 
 function passesProcess(
@@ -665,9 +717,17 @@ function passesProcess(
   });
 }
 
-/** A condition, or undefined when it is absent or blank. */
-function conditionOf(p: Preset, key: string): string | undefined {
-  const v = p.raw[key];
+/**
+ * A condition, or undefined when it is absent or blank.
+ *
+ * Read off the chain, because `compatible_printers_condition()` is a config
+ * accessor (Preset.hpp:347) and a user preset saved from a vendor one inherits the
+ * vendor's condition without stating a word of it. A child that states the key
+ * *blank* clears it, which is why this tests the value it found rather than
+ * continuing up the chain looking for a non-empty one.
+ */
+function conditionOf(look: ChainLook, key: string): string | undefined {
+  const v = look(key)?.value;
   if (typeof v !== 'string') return undefined;
   const text = v.trim();
   return text === '' ? undefined : text;

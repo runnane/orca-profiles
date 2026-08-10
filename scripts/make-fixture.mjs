@@ -59,6 +59,19 @@ const acmeFilaments = [
   // derives the old name only inside `if (alias_name.empty())`. The conf lists
   // "Acme PLA-CF Cube" and this preset must still count as not installed.
   ['Acme PLA-CF @Cube', { name: 'Acme PLA-CF @Cube', alias: 'Acme PLA-CF', inherits: 'fdm_filament_common', nozzle_temperature: '220' }],
+  // ── parents that carry a gate, for user presets to inherit ───────────────
+  // Nearly every real vendor filament is pinned to the printers it was tuned
+  // for, and a user preset saved from one **stores none of that** — the loader
+  // starts from the parent's config and lays the file's own keys over it
+  // (Preset.cpp:1679-1684). Without a parent that carries a gate, nothing in
+  // this fixture can tell "the file says nothing about printers" apart from
+  // "the preset is compatible with everything", which are opposite answers.
+  ['Acme ABS @Cube6', { name: 'Acme ABS @Cube6', inherits: 'fdm_filament_abs', compatible_printers: ['Acme Cube 0.6 nozzle'], nozzle_temperature: '252' }],
+  // The same, gated by a condition rather than a list — and one that is *false*
+  // for the Acme Cube, so a child inheriting it flips from available to excluded.
+  ['Acme PLA @Globex', { name: 'Acme PLA @Globex', inherits: 'fdm_filament_common', compatible_printers: [], compatible_printers_condition: 'printer_notes=~/.*GLOBEX.*/', nozzle_temperature: '213' }],
+  // And one carrying the *process* gate, which is inherited the same way.
+  ['Acme PLA @Fine', { name: 'Acme PLA @Fine', inherits: 'fdm_filament_common', compatible_prints: ['0.20mm Standard @Acme'], nozzle_temperature: '217' }],
 ];
 
 const acmeProcesses = [
@@ -451,6 +464,50 @@ write('user/default/filament/Studio PLA Opaque.json', {
   compatible_printers: [],
   compatible_printers_condition: 'interpolate_table(nozzle_diameter[0], (0.4, 1), (0.6, 0)) > 0.5',
   nozzle_temperature: '216',
+});
+
+// ── gates arriving through `inherits` rather than through the file ─────────
+// This is the commonest shape in a real config and the one that made the app
+// report 47 filaments where the slicer offered 18: "Save as" from a vendor
+// filament writes the overrides and nothing else, so the file mentions no
+// printers at all while the preset is pinned to one.
+write('user/default/filament/Studio ABS From Cube6.json', {
+  name: 'Studio ABS From Cube6',
+  from: 'User',
+  inherits: 'Acme ABS @Cube6',
+  nozzle_temperature: '258',
+});
+
+// The same parent, with the list stated **empty**. The loader applies the child's
+// own keys over the parent's config, and an empty vector is a value — so this one
+// really is compatible with everything, and it is the failing direction for
+// "present counts as stated": read it as absent and it falls through to the
+// parent's list, which is the opposite answer.
+write('user/default/filament/Studio ABS Unpinned.json', {
+  name: 'Studio ABS Unpinned',
+  from: 'User',
+  inherits: 'Acme ABS @Cube6',
+  compatible_printers: [],
+  nozzle_temperature: '259',
+});
+
+// An inherited *condition*. `compatible_printers_condition()` is a config
+// accessor (Preset.hpp:347), so this child is judged by an expression it does not
+// contain — and one that is false for the Acme Cube.
+write('user/default/filament/Studio PLA From Globex.json', {
+  name: 'Studio PLA From Globex',
+  from: 'User',
+  inherits: 'Acme PLA @Globex',
+  nozzle_temperature: '211',
+});
+
+// An inherited process gate, so the second relation has to be read off the chain
+// as well.
+write('user/default/filament/Studio PLA From Fine.json', {
+  name: 'Studio PLA From Fine',
+  from: 'User',
+  inherits: 'Acme PLA @Fine',
+  nozzle_temperature: '219',
 });
 
 // The process gate, which is a second relation and not the same one: this filament
