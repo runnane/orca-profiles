@@ -28,6 +28,22 @@ const write = (rel, obj) => {
   writeFileSync(full, JSON.stringify(obj, null, 4));
 };
 
+/**
+ * A user preset, with the `version` every real one carries.
+ *
+ * OrcaSlicer writes a `version` into every user preset it saves, and a user preset
+ * *without* a parseable one is never loaded: `Semver::parse` fails on the empty
+ * string a missing key produces, and `load_presets` skips the file with no error and
+ * no log line (Preset.cpp:1653-1655). A fixture whose user presets had no `version`
+ * was therefore modelling a config in which almost nothing loads — so it is the
+ * default here, and a shape that deliberately lacks one passes `version: null` to
+ * say so out loud.
+ */
+const USER_VERSION = '2.4.0.3';
+const writeUser = (rel, { version, ...rest }) => {
+  write(rel, version === null ? rest : { ...rest, version: version ?? USER_VERSION });
+};
+
 /** A block of plausible print settings, so "full copies" are genuinely large. */
 function bulkSettings(seed = 0) {
   const out = {};
@@ -83,8 +99,12 @@ const acmeFilaments = [
   // Acme's own ABS base, deliberately *not* in the library: it is what the
   // cross-vendor violation below reaches for, and it has to be unreachable.
   ['fdm_filament_abs', { name: 'fdm_filament_abs', instantiation: 'false', inherits: 'fdm_filament_common', nozzle_temperature: '250', hot_plate_temp: '90' }],
-  ['Acme ABS @System', { name: 'Acme ABS @System', inherits: 'fdm_filament_abs', setting_id: 'ACMEABS000000001', filament_max_volumetric_speed: '8' }],
-  ['Acme PLA @System', { name: 'Acme PLA @System', inherits: 'fdm_filament_common', setting_id: 'ACMEPLA000000001', nozzle_temperature: '215' }],
+  // `filament_vendor` and `filament_type` are what the dropdown sub-groups and
+  // orders system presets by (PresetComboBoxes.cpp:1222, :1330-1350). Stated on
+  // some and not others on purpose: a preset with no vendor goes under
+  // "Unspecified" rather than into a nameless submenu.
+  ['Acme ABS @System', { name: 'Acme ABS @System', inherits: 'fdm_filament_abs', setting_id: 'ACMEABS000000001', filament_vendor: 'Acme', filament_type: 'ABS', filament_max_volumetric_speed: '8' }],
+  ['Acme PLA @System', { name: 'Acme PLA @System', inherits: 'fdm_filament_common', setting_id: 'ACMEPLA000000001', filament_vendor: 'Acme', filament_type: 'PLA', nozzle_temperature: '215' }],
   // Installed under the name the loader *derives* rather than under its own. A
   // vendor preset with an `@` in its name and no `alias` of its own gets a
   // `renamed_from` of the name with the `@` deleted — "Acme PETG Cube", which is
@@ -271,7 +291,7 @@ write('system/Globex.json', {
 // `default`, because OrcaSlicer.conf below leaves `preset_folder` empty.
 
 // A sparse preset: a handful of overrides over a deep system chain.
-write('user/default/filament/Studio ABS.json', {
+writeUser('user/default/filament/Studio ABS.json', {
   name: 'Studio ABS',
   from: 'User',
   inherits: 'Acme ABS @System',
@@ -283,7 +303,7 @@ write('user/default/filament/Studio ABS.json', {
 
 // Two overrides that change nothing plus two that do — the "looks bigger than
 // it is" case, in miniature.
-write('user/default/filament/Studio ABS Hot.json', {
+writeUser('user/default/filament/Studio ABS Hot.json', {
   name: 'Studio ABS Hot',
   from: 'User',
   inherits: 'Acme ABS @System',
@@ -295,7 +315,7 @@ write('user/default/filament/Studio ABS Hot.json', {
 
 // A "- Copy" that kept its parent but re-stated almost everything: 120+ keys
 // stored, a couple that differ.
-write('user/default/process/0.28mm Draft @Acme - Copy.json', {
+writeUser('user/default/process/0.28mm Draft @Acme - Copy.json', {
   name: '0.28mm Draft @Acme - Copy',
   from: 'User',
   inherits: '0.28mm Draft @Acme',
@@ -306,7 +326,7 @@ write('user/default/process/0.28mm Draft @Acme - Copy.json', {
 });
 
 // A detached full copy: no parent, everything stored inline.
-write('user/default/process/Fast Draft.json', {
+writeUser('user/default/process/Fast Draft.json', {
   name: 'Fast Draft',
   from: 'User',
   inherits: '',
@@ -323,7 +343,7 @@ write('user/default/process/Fast Draft.json', {
 
 // A SECOND file claiming the same name, written in the other serialisation.
 // OrcaSlicer loads one of these and never loads the other.
-write('user/default/process/Fast Draft 2.json', {
+writeUser('user/default/process/Fast Draft 2.json', {
   name: 'Fast Draft', // <- same declared name, different file
   type: 'print',
   ...bulkSettings(7),
@@ -338,7 +358,7 @@ write('user/default/process/Fast Draft 2.json', {
 });
 
 // A custom root in base/: saved detached, and inherited by name from elsewhere.
-write('user/default/process/base/Studio Base.json', {
+writeUser('user/default/process/base/Studio Base.json', {
   name: 'Studio Base',
   from: 'User',
   inherits: '',
@@ -346,7 +366,7 @@ write('user/default/process/base/Studio Base.json', {
   layer_height: '0.24',
   wall_loops: '4',
 });
-write('user/default/process/Studio Base Fine.json', {
+writeUser('user/default/process/Studio Base Fine.json', {
   name: 'Studio Base Fine',
   from: 'User',
   inherits: 'Studio Base',
@@ -357,7 +377,7 @@ write('user/default/process/Studio Base Fine.json', {
 // loaded first by guarantee (Preset.cpp:1583), so this one is never loaded — and
 // `Studio Base Fine` inherits the one in `base/`, not this. An inheritance edge
 // drawn to the wrong file shows a chain that does not exist.
-write('user/default/process/Studio Base.json', {
+writeUser('user/default/process/Studio Base.json', {
   name: 'Studio Base',
   from: 'User',
   inherits: '',
@@ -370,13 +390,13 @@ write('user/default/process/Studio Base.json', {
 // writes, everything a text editor can produce — and the reason resolution has a
 // cycle guard at all. The graph has to draw the closing edge rather than follow
 // it.
-write('user/default/process/Loop A.json', {
+writeUser('user/default/process/Loop A.json', {
   name: 'Loop A',
   from: 'User',
   inherits: 'Loop B',
   layer_height: '0.26',
 });
-write('user/default/process/Loop B.json', {
+writeUser('user/default/process/Loop B.json', {
   name: 'Loop B',
   from: 'User',
   inherits: 'Loop A',
@@ -384,7 +404,7 @@ write('user/default/process/Loop B.json', {
 });
 
 // A preset whose declared parent is not installed.
-write('user/default/process/Orphaned Profile.json', {
+writeUser('user/default/process/Orphaned Profile.json', {
   name: 'Orphaned Profile',
   from: 'User',
   inherits: 'A Preset That Does Not Exist',
@@ -393,7 +413,7 @@ write('user/default/process/Orphaned Profile.json', {
 
 // A machine preset carrying credentials that are actually set, so redaction has
 // something to redact. Invented values.
-write('user/default/machine/Workshop Cube.json', {
+writeUser('user/default/machine/Workshop Cube.json', {
   name: 'Workshop Cube',
   from: 'User',
   inherits: 'Acme Cube 0.4 nozzle',
@@ -405,7 +425,7 @@ write('user/default/machine/Workshop Cube.json', {
   printhost_port: '80',
   host_type: 'octoprint',
 });
-write('user/default/machine/Workshop Cube MK2.json', {
+writeUser('user/default/machine/Workshop Cube MK2.json', {
   name: 'Workshop Cube MK2',
   from: 'User',
   inherits: 'Acme Cube 0.4 nozzle',
@@ -421,7 +441,7 @@ write('user/default/machine/Workshop Cube MK2.json', {
 
 // Inherits a name two vendors claim. Whichever vendor's file survives the merge
 // decides what this preset resolves to.
-write('user/default/filament/Studio Shared.json', {
+writeUser('user/default/filament/Studio Shared.json', {
   name: 'Studio Shared',
   from: 'User',
   inherits: 'Shared PLA @System',
@@ -429,7 +449,7 @@ write('user/default/filament/Studio Shared.json', {
 });
 
 // A filament limited to printers that are not installed.
-write('user/default/filament/Legacy PETG.json', {
+writeUser('user/default/filament/Legacy PETG.json', {
   name: 'Legacy PETG',
   from: 'User',
   inherits: 'Globex PETG @System',
@@ -440,7 +460,7 @@ write('user/default/filament/Legacy PETG.json', {
 // The same fault written the other way. A hand-edited or round-tripped preset
 // stores the vector serialised, and the array-only check never looked at it — so
 // this shape exists to make that check able to fail.
-write('user/default/filament/Retired PETG.json', {
+writeUser('user/default/filament/Retired PETG.json', {
   name: 'Retired PETG',
   from: 'User',
   inherits: 'Globex PETG @System',
@@ -450,7 +470,7 @@ write('user/default/filament/Retired PETG.json', {
 
 // A filament pinned to a process that is not installed. Different key, different
 // consequence: it never becomes selectable *with that process*.
-write('user/default/filament/Studio ABS Fine Only.json', {
+writeUser('user/default/filament/Studio ABS Fine Only.json', {
   name: 'Studio ABS Fine Only',
   from: 'User',
   inherits: 'Acme ABS @System',
@@ -462,16 +482,100 @@ write('user/default/filament/Studio ABS Fine Only.json', {
 // A filament whose `inherits` names a **process** preset. It looks resolvable and
 // is not: a name is resolved inside one collection, and a collection holds a
 // single preset type (Preset.cpp:3229).
-write('user/default/filament/Muddled ABS.json', {
+writeUser('user/default/filament/Muddled ABS.json', {
   name: 'Muddled ABS',
   from: 'User',
   inherits: '0.20mm Standard @Acme',
   nozzle_temperature: '260',
 });
 
+// ─── a parent that exists as a file and is still not loadable ──────────────
+// The ORCA-17 shape, and the one a config snapshot cannot show without the rule:
+// `version` is parsed before the parent lookup, and a user preset whose `version`
+// does not parse is dropped with no error and no log line (Preset.cpp:1653-1655).
+// A dropped preset is not in the collection, so nothing can inherit from it —
+// which is why the two presets below it are dropped too, each logging "can not
+// find parent" (Preset.cpp:1686-1691).
+//
+// This sits in `machine/base/` on purpose: `base/` is loaded first and is the one
+// place a custom root *should* be reachable from, so a failure here is the case
+// that reads as "but the file is right there".
+writeUser('user/default/machine/base/Bench Rig Base.json', {
+  name: 'Bench Rig Base',
+  from: 'User',
+  inherits: '',
+  version: null, // <- the fault. Never loaded, and not usable as a parent.
+  ...bulkSettings(31),
+  printable_height: '240',
+  nozzle_diameter: '0.4',
+});
+
+// The child. Its 120-odd keys are the only values it has, because the parent is
+// never applied — so "overrides that change nothing" would be exactly backwards,
+// and it must not be reported as a near-duplicate of its sibling either.
+writeUser('user/default/machine/Bench Rig A.json', {
+  name: 'Bench Rig A',
+  from: 'User',
+  inherits: 'Bench Rig Base',
+  ...bulkSettings(31),
+  printable_height: '240',
+  nozzle_diameter: '0.4',
+});
+
+// The sibling: identical in effect to `Bench Rig A` under a resolution that
+// applies the parent, and equally not loaded. The pair is what makes the
+// `near-duplicate` suppression able to fail.
+writeUser('user/default/machine/Bench Rig B.json', {
+  name: 'Bench Rig B',
+  from: 'User',
+  inherits: 'Bench Rig Base',
+  ...bulkSettings(31),
+  printable_height: '240',
+  nozzle_diameter: '0.4',
+});
+
+// The grandchild, so the cascade is covered rather than assumed: its own parent is
+// a file that exists, in the loaded folder, under the right name, and is skipped.
+writeUser('user/default/machine/Bench Rig A Fine.json', {
+  name: 'Bench Rig A Fine',
+  from: 'User',
+  inherits: 'Bench Rig A',
+  printable_height: '235',
+});
+
+// The control, and the reason this is a test rather than an assertion: the same
+// shape with a `version` the parser accepts. It loads, so `Bench Rig C` resolves
+// through it and gets ordinary redundant-override advice.
+writeUser('user/default/machine/base/Bench Rig Base OK.json', {
+  name: 'Bench Rig Base OK',
+  from: 'User',
+  inherits: '',
+  ...bulkSettings(37),
+  printable_height: '260',
+});
+writeUser('user/default/machine/Bench Rig C.json', {
+  name: 'Bench Rig C',
+  from: 'User',
+  inherits: 'Bench Rig Base OK',
+  printable_height: '260', // identical to the parent -> redundant, and reported
+  nozzle_diameter: '0.4',
+});
+
+// A `version` that is *present* and still rejected: the parser needs at least
+// `major.minor`, all numeric, so a bare `"1"` fails the component count
+// (semver.c:212-213) exactly as an absent key does. Two different fixes, so the
+// finding has to be able to tell them apart.
+writeUser('user/default/process/Half Versioned.json', {
+  name: 'Half Versioned',
+  from: 'User',
+  inherits: '0.20mm Standard @Acme',
+  version: '1',
+  layer_height: '0.21',
+});
+
 // A preset whose parent exists — but only in the cloud profile, which is not the
 // loaded one. Indistinguishable from "you deleted it" until the finding says so.
-write('user/default/process/Wants Cloud Base.json', {
+writeUser('user/default/process/Wants Cloud Base.json', {
   name: 'Wants Cloud Base',
   from: 'User',
   inherits: 'Cloud Only',
@@ -486,7 +590,7 @@ write('user/default/process/Wants Cloud Base.json', {
 // that preset, so the slicer offers this filament for it anyway
 // (`is_compatible_with_parent_printer`, Preset.cpp:798-806). This is the shape
 // that catches a model built on name-matching alone.
-write('user/default/filament/Studio PLA Inherited.json', {
+writeUser('user/default/filament/Studio PLA Inherited.json', {
   name: 'Studio PLA Inherited',
   from: 'User',
   inherits: 'Acme PLA @System',
@@ -496,7 +600,7 @@ write('user/default/filament/Studio PLA Inherited.json', {
 
 // Excluded: a non-empty list that names another installed printer and not this
 // one. Not an orphan — the printer it names is real.
-write('user/default/filament/Studio PLA MK2 Only.json', {
+writeUser('user/default/filament/Studio PLA MK2 Only.json', {
   name: 'Studio PLA MK2 Only',
   from: 'User',
   inherits: 'Acme PLA @System',
@@ -507,7 +611,7 @@ write('user/default/filament/Studio PLA MK2 Only.json', {
 // A condition with an *empty* list, which is the case the slicer treats as "the
 // condition is the whole answer" (Preset.cpp:826). Not evaluated yet, so it has to
 // come back undetermined with the expression shown rather than as a guess.
-write('user/default/filament/Studio PLA Conditional.json', {
+writeUser('user/default/filament/Studio PLA Conditional.json', {
   name: 'Studio PLA Conditional',
   from: 'User',
   inherits: 'Acme PLA @System',
@@ -518,7 +622,7 @@ write('user/default/filament/Studio PLA Conditional.json', {
 
 // A condition we could never evaluate — a function outside any documented subset.
 // It must land on undetermined too, not on a default answer.
-write('user/default/filament/Studio PLA Opaque.json', {
+writeUser('user/default/filament/Studio PLA Opaque.json', {
   name: 'Studio PLA Opaque',
   from: 'User',
   inherits: 'Acme PLA @System',
@@ -532,7 +636,7 @@ write('user/default/filament/Studio PLA Opaque.json', {
 // report 47 filaments where the slicer offered 18: "Save as" from a vendor
 // filament writes the overrides and nothing else, so the file mentions no
 // printers at all while the preset is pinned to one.
-write('user/default/filament/Studio ABS From Cube6.json', {
+writeUser('user/default/filament/Studio ABS From Cube6.json', {
   name: 'Studio ABS From Cube6',
   from: 'User',
   inherits: 'Acme ABS @Cube6',
@@ -544,7 +648,7 @@ write('user/default/filament/Studio ABS From Cube6.json', {
 // really is compatible with everything, and it is the failing direction for
 // "present counts as stated": read it as absent and it falls through to the
 // parent's list, which is the opposite answer.
-write('user/default/filament/Studio ABS Unpinned.json', {
+writeUser('user/default/filament/Studio ABS Unpinned.json', {
   name: 'Studio ABS Unpinned',
   from: 'User',
   inherits: 'Acme ABS @Cube6',
@@ -555,7 +659,7 @@ write('user/default/filament/Studio ABS Unpinned.json', {
 // An inherited *condition*. `compatible_printers_condition()` is a config
 // accessor (Preset.hpp:347), so this child is judged by an expression it does not
 // contain — and one that is false for the Acme Cube.
-write('user/default/filament/Studio PLA From Globex.json', {
+writeUser('user/default/filament/Studio PLA From Globex.json', {
   name: 'Studio PLA From Globex',
   from: 'User',
   inherits: 'Acme PLA @Globex',
@@ -564,7 +668,7 @@ write('user/default/filament/Studio PLA From Globex.json', {
 
 // An inherited process gate, so the second relation has to be read off the chain
 // as well.
-write('user/default/filament/Studio PLA From Fine.json', {
+writeUser('user/default/filament/Studio PLA From Fine.json', {
   name: 'Studio PLA From Fine',
   from: 'User',
   inherits: 'Acme PLA @Fine',
@@ -573,7 +677,7 @@ write('user/default/filament/Studio PLA From Fine.json', {
 
 // The process gate, which is a second relation and not the same one: this filament
 // is fine for the printer and only offered with one process.
-write('user/default/filament/Studio PLA Fine Process.json', {
+writeUser('user/default/filament/Studio PLA Fine Process.json', {
   name: 'Studio PLA Fine Process',
   from: 'User',
   inherits: 'Acme PLA @System',
@@ -586,13 +690,13 @@ write('user/default/filament/Studio PLA Fine Process.json', {
 // preset_folder empty none of this is live.
 
 const CLOUD = 'user/cloud-0000-1111';
-write(`${CLOUD}/filament/Studio ABS.json`, {
+writeUser(`${CLOUD}/filament/Studio ABS.json`, {
   name: 'Studio ABS', // same name as the live one — expected, not a clash
   from: 'User',
   inherits: 'Acme ABS @System',
   filament_max_volumetric_speed: '14',
 });
-write(`${CLOUD}/process/Cloud Only.json`, {
+writeUser(`${CLOUD}/process/Cloud Only.json`, {
   name: 'Cloud Only',
   from: 'User',
   inherits: '0.20mm Standard @Acme',
@@ -601,14 +705,14 @@ write(`${CLOUD}/process/Cloud Only.json`, {
 
 for (const snap of ['aaaa0000-0000-0000-0000-000000000001', 'aaaa0000-0000-0000-0000-000000000002']) {
   for (const name of ['Studio ABS', 'Snapshot Filament']) {
-    write(`${CLOUD}/_local/${snap}/filament/${name}.json`, {
+    writeUser(`${CLOUD}/_local/${snap}/filament/${name}.json`, {
       name,
       from: 'User',
       inherits: 'Acme ABS @System',
       nozzle_temperature: '250',
     });
   }
-  write(`${CLOUD}/_local/${snap}/process/Cloud Only.json`, {
+  writeUser(`${CLOUD}/_local/${snap}/process/Cloud Only.json`, {
     name: 'Cloud Only',
     from: 'User',
     inherits: '0.20mm Standard @Acme',

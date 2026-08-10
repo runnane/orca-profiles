@@ -29,9 +29,11 @@ import {
   shadowedIds,
   type ConfigIndex,
 } from './index-config';
+import { groupLikeSlicer, presetAlias } from './grouping';
 import { readInstalled } from './installed';
 import { loadConfigDir } from './load-fixtures';
 import { parseQuotedList, scalarAsList, valuesEqual } from './normalize';
+import { parsesAsSemver } from './preset-version';
 import { presetReferences, referenceNames } from './references';
 import { isSensitiveKey, maskValue, redactConfJson, redactPresetJson, REDACTED } from './redact';
 import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
@@ -486,9 +488,12 @@ describe('reference enumeration', () => {
 });
 
 describe('reference classification', () => {
+  // `version` by default, because a user preset without a parseable one is never
+  // loaded at all (Preset.cpp:1653-1655) and these cases are about *which* loaded
+  // file a name means. A case that wants the version gate passes its own.
   const preset = (path: string, raw: Record<string, unknown>) => ({
     path,
-    text: JSON.stringify(raw),
+    text: JSON.stringify({ version: '2.4.0.3', ...raw }),
   });
 
   it('points a clashing name at the file that actually wins', () => {
@@ -564,6 +569,179 @@ describe('dead files', () => {
   it('disambiguates titles when a name is claimed more than once', () => {
     const titles = findings.filter((f) => f.kind === 'detached').map((f) => f.title);
     expect(new Set(titles).size).toBe(titles.length);
+  });
+});
+
+describe('the version gate', () => {
+  // A port of the parser the slicer links (`deps_src/semver/semver.c`), not of the
+  // semver spec — they disagree, and it is the former that decides whether a user
+  // preset loads. Each case here is one branch of it.
+  it('accepts what semver.c accepts', () => {
+    // Two to four numeric components: `semver_parse_version` counts iterations and
+    // ends on `index == 2 || index == 3 || index == 4` (semver.c:212-213).
+    expect(parsesAsSemver('1.9')).toBe(true);
+    expect(parsesAsSemver('1.9.0')).toBe(true);
+    expect(parsesAsSemver('2.4.0.3')).toBe(true);
+    // Leading zeros are fine: `strtol`, not a spec-compliant grammar.
+    expect(parsesAsSemver('01.09.00.02')).toBe(true);
+    // The loop stops at four slices, so a fifth is never examined and cannot fail.
+    expect(parsesAsSemver('1.2.3.4.5')).toBe(true);
+    // `parse_slice` cuts metadata then prerelease off the head first (semver.c:154-155).
+    expect(parsesAsSemver('1.9.0-beta')).toBe(true);
+    expect(parsesAsSemver('1.9.0+build7')).toBe(true);
+  });
+
+  it('rejects what semver.c rejects, starting with the empty string', () => {
+    // The case that matters most: a missing `version` key reaches the parser as `""`,
+    // because `key_values` only gains an entry when the file has one
+    // (Config.cpp:885-887) and `std::map::operator[]` default-constructs.
+    expect(parsesAsSemver('')).toBe(false);
+    // One component: `index == 1`, which is not in the accepted set.
+    expect(parsesAsSemver('1')).toBe(false);
+    // `strtol` has to consume each slice whole.
+    expect(parsesAsSemver('1.x')).toBe(false);
+    expect(parsesAsSemver('draft')).toBe(false);
+    // Outside `VALID_CHARS` (semver.c:20) — a space is not in it.
+    expect(parsesAsSemver('1.9 ')).toBe(false);
+    expect(parsesAsSemver('1_9')).toBe(false);
+    // `has_valid_length`: MAX_SIZE is 255 (semver.c:22).
+    expect(parsesAsSemver(`1.${'9'.repeat(255)}`)).toBe(false);
+    // SLICE_SIZE is 50 (semver.c:13).
+    expect(parsesAsSemver(`1.${'9'.repeat(51)}`)).toBe(false);
+  });
+
+  it('does not apply the gate to system presets', () => {
+    // `parse_subfile` (PresetBundle.cpp:4836+) has no version gate at all, and no
+    // vendor preset in the fixture declares one. Applying the user rule to them
+    // would empty the config. A system preset can still be excluded for losing a
+    // *name clash*, which is a different rule and stays.
+    const system = index.active.filter((p) => p.origin === 'system');
+    expect(system.length).toBeGreaterThan(0);
+    const excluded = system
+      .map((p) => index.notLoaded.get(p.id)?.reason)
+      .filter((r) => r !== undefined);
+    expect(excluded).not.toContain('bad-version');
+    expect(excluded).not.toContain('parent-not-loaded');
+  });
+});
+
+describe('a parent that exists as a file and is still not loadable', () => {
+  const findings = analyze(index);
+  const base = byFile('machine/base/Bench Rig Base.json');
+  const child = byFile('machine/Bench Rig A.json');
+  const sibling = byFile('machine/Bench Rig B.json');
+  const grandchild = byFile('machine/Bench Rig A Fine.json');
+  const control = byFile('machine/Bench Rig C.json');
+  const of = (id: string) => findings.filter((f) => f.presetIds.includes(id));
+
+  it('knows the parent is not loaded, and why', () => {
+    expect(index.notLoaded.get(base.id)).toEqual({ reason: 'bad-version' });
+  });
+
+  it('refuses to resolve a name onto it', () => {
+    // The bug: as long as *a file* claimed the name we treated the chain as intact.
+    const r = classifyReference(index, child, 'machine', 'Bench Rig Base');
+    expect(r.reason).toBe('not-loaded');
+    expect(r.target).toBeUndefined();
+    expect(r.others.map((o) => o.path)).toEqual([base.path]);
+    expect(inheritanceChain(index, child).missingParent).toBe('Bench Rig Base');
+    expect(inheritanceChain(index, child).chain).toHaveLength(1);
+  });
+
+  it('cascades to the grandchild', () => {
+    // A skipped preset is not in the collection, so its own children fail the same
+    // lookup. One pass over the config finds the child and misses this.
+    expect(index.notLoaded.get(child.id)).toEqual({
+      reason: 'parent-not-loaded',
+      parentName: 'Bench Rig Base',
+    });
+    expect(index.notLoaded.get(grandchild.id)).toEqual({
+      reason: 'parent-not-loaded',
+      parentName: 'Bench Rig A',
+    });
+  });
+
+  it('reports broken-parent on the child and on the cascade', () => {
+    for (const p of [child, sibling, grandchild]) {
+      const broken = of(p.id).filter((f) => f.kind === 'broken-parent');
+      expect(broken).toHaveLength(1);
+      expect(broken[0].reference?.unresolved[0].reason).toBe('not-loaded');
+    }
+  });
+
+  it('says which gate the parent hit, differently for each', () => {
+    const direct = of(child.id).find((f) => f.kind === 'broken-parent')!;
+    expect(direct.detail).toContain('`version` does not parse');
+    expect(direct.detail).toContain('Preset.cpp:1653-1655');
+    // The grandchild's parent failed for a different reason and needs a different
+    // fix — fix the top of the chain, not this file.
+    const cascaded = of(grandchild.id).find((f) => f.kind === 'broken-parent')!;
+    expect(cascaded.detail).toContain('its own `inherits`');
+    expect(cascaded.detail).toContain('from the top down');
+  });
+
+  it('reports the unloadable parent itself, with the fix', () => {
+    const own = of(base.id);
+    expect(own.map((f) => f.kind)).toEqual(['not-loaded']);
+    expect(own[0].title).toContain('has no `version`');
+    expect(own[0].detail).toContain('cannot be inherited from');
+  });
+
+  it('distinguishes a version that is present from one that is missing', () => {
+    const half = byFile('process/Half Versioned.json');
+    expect(index.notLoaded.get(half.id)).toEqual({ reason: 'bad-version' });
+    const own = of(half.id);
+    expect(own.map((f) => f.kind)).toEqual(['not-loaded']);
+    expect(own[0].title).toContain('`version` is not a version');
+    expect(own[0].detail).toContain('"1"');
+  });
+
+  // The suppression, which the issue rates as mattering as much as the finding. The
+  // child stores 122 keys and every one of them is the only value it has, because
+  // the parent is never applied.
+  it('does not call the child’s only values redundant overrides', () => {
+    expect(of(child.id).filter((f) => f.kind === 'redundant-overrides')).toEqual([]);
+  });
+
+  it('does not claim two unloaded siblings are identical in effect', () => {
+    const pair = findings.filter(
+      (f) =>
+        f.kind === 'near-duplicate' &&
+        f.presetIds.includes(child.id) &&
+        f.presetIds.includes(sibling.id),
+    );
+    expect(pair).toEqual([]);
+    // Nor paired with anything else: neither file is in the slicer at all.
+    expect(findings.filter((f) => f.kind === 'near-duplicate' && f.presetIds.includes(child.id)))
+      .toEqual([]);
+  });
+
+  it('says nothing else about a file the slicer never read', () => {
+    // Exactly one finding each, and it is the one that explains the absence.
+    expect(of(child.id).map((f) => f.kind)).toEqual(['broken-parent']);
+    expect(of(grandchild.id).map((f) => f.kind)).toEqual(['broken-parent']);
+  });
+
+  // The control. A check that suppresses everything is not a check — the same shape
+  // with a parseable `version` has to keep behaving as it always did.
+  it('still gives ordinary advice when the parent does load', () => {
+    expect(index.notLoaded.has(control.id)).toBe(false);
+    expect(inheritanceChain(index, control).chain.map((p) => p.name)).toEqual([
+      'Bench Rig C',
+      'Bench Rig Base OK',
+    ]);
+    expect(of(control.id).map((f) => f.kind)).toContain('redundant-overrides');
+  });
+
+  it('draws the unresolved edge and marks the subtree dead', () => {
+    const graph = buildGraph(index, { kinds: ['machine'] });
+    const edge = graph.edges.find((e) => e.childId === child.id)!;
+    expect(edge.resolved).toBe(false);
+    expect(edge.reason).toBe('not-loaded');
+    expect(edge.parentId).toBeUndefined();
+    const dead = new Set(graph.nodes.filter((n) => n.shadowed).map((n) => n.id));
+    for (const p of [base, child, sibling, grandchild]) expect(dead.has(p.id)).toBe(true);
+    expect(dead.has(control.id)).toBe(false);
   });
 });
 
@@ -1941,5 +2119,142 @@ describe('a vendor inherits inside its own bundle', () => {
     // The issue asked for this rather than assuming nothing else shifts: the
     // fixture's deepest chain is a user process and is unaffected by a vendor rule.
     expect(stats(index).deepestChain).toEqual({ name: '0.28mm Draft @Acme - Copy', depth: 5 });
+  });
+});
+
+describe('the dropdown’s own grouping', () => {
+  // Modelled on `PlaterPresetComboBox::update` (v2.4.2 PresetComboBoxes.cpp), so
+  // that the two lists can be read side by side rather than reconciled by eye.
+  const machine = byFile('user/default/machine/Workshop Cube.json');
+  const c = compatibilityFor(index, machine);
+  const groups = groupLikeSlicer(index, c.filaments);
+  const titled = (g: string) => groups.find((x) => x.group === g);
+
+  it('emits the slicer’s sections, in the slicer’s order and words', () => {
+    // `User presets`, `System presets`, `Unsupported presets` (:1421-1430), then
+    // the two this app adds.
+    expect(groups.map((g) => g.group)).toEqual([
+      'user',
+      'system',
+      'unsupported',
+      'undetermined',
+      'not-installed',
+    ]);
+    expect(groups.slice(0, 3).map((g) => g.title)).toEqual([
+      'User presets',
+      'System presets',
+      'Unsupported presets',
+    ]);
+  });
+
+  it('marks the two groups the slicer does not have', () => {
+    // Neither exists in the dropdown: a condition it cannot evaluate does not
+    // arise, and an uninstalled preset is simply absent. Presenting either as one
+    // of the slicer's sections would be claiming it hides them.
+    expect(groups.filter((g) => g.ours).map((g) => g.group)).toEqual([
+      'undetermined',
+      'not-installed',
+    ]);
+  });
+
+  it('sub-groups system filaments by filament_vendor, and only those', () => {
+    expect(titled('system')?.subgroups.map((s) => s.title)).toEqual(['Acme', 'Unspecified']);
+    // `groupByGroup` is false for exactly the system group (:1324); every other
+    // group renders as one list.
+    for (const g of groups.filter((x) => x.group !== 'system')) {
+      expect(g.subgroups.map((s) => s.title)).toEqual(['']);
+    }
+  });
+
+  it('never sub-groups processes, whose vendor and type are empty', () => {
+    // The by-vendor grouping reads filament-only attributes (:1418-1422), so
+    // applying it here would bucket every process under "Unspecified".
+    for (const g of groupLikeSlicer(index, c.processes)) {
+      expect(g.subgroups.map((s) => s.title)).toEqual(['']);
+    }
+  });
+
+  it('labels a row with its alias, as the plater combo does', () => {
+    // `Preset::label(false)` = alias when there is one (:1098-1100).
+    const rows = groups.flatMap((g) => g.subgroups.flatMap((s) => s.items));
+    const stated = rows.find((r) => r.name === 'Acme PLA-CF @Cube');
+    expect(stated?.label).toBe('Acme PLA-CF');
+    // Derived, because that preset states no alias: the name up to the `@`,
+    // right-trimmed (PresetBundle.cpp:5086-5099).
+    expect(rows.find((r) => r.name === 'Acme PETG @Cube')?.label).toBe('Acme PETG');
+    // No `@` at all: the alias is the whole name.
+    expect(rows.find((r) => r.name === 'Studio ABS')?.label).toBe('Studio ABS');
+  });
+
+  it('does not confuse the alias derivation with the renamed_from one', () => {
+    // One character apart and easy to implement once by accident: the alias is
+    // right-trimmed (`boost::trim_right`), the `renamed_from` name keeps the
+    // space because it is concatenated before the trim. `Acme PETG @Cube` is
+    // therefore alias "Acme PETG" and old name "Acme PETG Cube".
+    const p = byFile('system/Acme/filament/Acme PETG @Cube.json');
+    expect(presetAlias(index, p)).toBe('Acme PETG');
+    expect(index.installed.filaments.has('Acme PETG Cube')).toBe(true);
+  });
+});
+
+describe('the dropdown’s row order', () => {
+  const files = (names: { name: string; vendor?: string; type?: string }[]) => [
+    { path: 'OrcaSlicer.conf', text: JSON.stringify({ filaments: names.map((n) => n.name), models: [] }) },
+    { path: 'user/default/machine/m.json', text: JSON.stringify({ name: 'Mine' }) },
+    ...names.map((n, i) => ({
+      path: `system/V/filament/f${i}.json`,
+      text: JSON.stringify({
+        name: n.name,
+        ...(n.vendor === undefined ? {} : { filament_vendor: n.vendor }),
+        ...(n.type === undefined ? {} : { filament_type: n.type }),
+      }),
+    })),
+  ];
+  const order = (names: { name: string; vendor?: string; type?: string }[], group = 'system') => {
+    const built = buildIndex(files(names));
+    const m = built.presets.find((p) => p.name === 'Mine')!;
+    const g = groupLikeSlicer(built, compatibilityFor(built, m).filaments).find((x) => x.group === group)!;
+    return g.subgroups.flatMap((s) => s.items).map((i) => i.name);
+  };
+
+  it('puts PLA, PETG, ABS and TPU first, then falls back to the name', () => {
+    // `first_types` (:1316), which is why a real `Generic` submenu reads PLA,
+    // PETG, ABS, TPU, then ASA, PA, PA-CF… Sorted alphabetically it would open
+    // with ABS, and the two lists stop lining up row for row.
+    expect(
+      order([
+        { name: 'G ASA', vendor: 'Generic', type: 'ASA' },
+        { name: 'G ABS', vendor: 'Generic', type: 'ABS' },
+        { name: 'G PLA', vendor: 'Generic', type: 'PLA' },
+        { name: 'G PVA', vendor: 'Generic', type: 'PVA' },
+        { name: 'G PETG', vendor: 'Generic', type: 'PETG' },
+      ]),
+    ).toEqual(['G PLA', 'G PETG', 'G ABS', 'G ASA', 'G PVA']);
+  });
+
+  it('orders the vendor submenus with Bambu and Generic first', () => {
+    // `first_vendors` (:1315).
+    const built = buildIndex(
+      files([
+        { name: 'A one', vendor: 'Acme', type: 'PLA' },
+        { name: 'B one', vendor: 'Generic', type: 'PLA' },
+        { name: 'C one', vendor: 'Bambu Lab', type: 'PLA' },
+      ]),
+    );
+    const m = built.presets.find((p) => p.name === 'Mine')!;
+    const sys = groupLikeSlicer(built, compatibilityFor(built, m).filaments).find(
+      (x) => x.group === 'system',
+    )!;
+    // And "Bambu Lab" is rewritten to "Bambu" (:1223-1224) — the submenu is
+    // labelled with the short name, so matching on the raw value finds nothing.
+    expect(sys.subgroups.map((s) => s.title)).toEqual(['Bambu', 'Generic', 'Acme']);
+  });
+
+  it('sorts by bytes, not by locale, so two spellings of one name stay apart', () => {
+    // The comparator ends in `std::string <`. `localeCompare` orders "jon PLA"
+    // before "Jon PLA"; the slicer does the opposite, and a config holding both
+    // is exactly the one someone is trying to make sense of.
+    expect(order([{ name: 'jon PLA' }, { name: 'Jon PLA' }])).toEqual(['Jon PLA', 'jon PLA']);
+    expect(['jon PLA', 'Jon PLA'].sort((a, b) => a.localeCompare(b, 'en'))[0]).toBe('jon PLA');
   });
 });

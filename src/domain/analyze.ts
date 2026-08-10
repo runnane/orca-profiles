@@ -12,7 +12,14 @@
  *                  and bury the handful of edits that matter.
  *  - near-duplicate  two presets whose effective settings differ in only a few
  *                  keys. `ABS fast` / `ABS fast2` is the worked example.
- *  - broken-parent `inherits` naming a preset that is not installed.
+ *  - broken-parent `inherits` naming a preset the slicer cannot resolve — either
+ *                  nothing has that name, or the file that does is one the slicer
+ *                  itself never loads. The second reads as "but it is right
+ *                  there", and is the case that used to be reported as *redundant
+ *                  overrides* instead: with the parent silently absent, every
+ *                  value in the child is the only value it has.
+ *  - not-loaded    a file the slicer skips outright, so nothing in it takes
+ *                  effect. `index.notLoaded` carries the gate it hit.
  *  - orphaned-printer  `compatible_printers` naming a machine that is gone, so
  *                  the preset silently never appears in the slicer.
  *  - missing-reference  any of the *other* keys that name a preset —
@@ -38,11 +45,13 @@ import {
   clashGroups,
   FILAMENT_LIBRARY_VENDOR,
   loadOrder,
-  shadowedIds,
+  notLoadedIds,
   tieIsArbitrary,
   type ConfigIndex,
+  type LoadFailure,
   type ReferenceReason,
 } from './index-config';
+import { declaredVersion } from './preset-version';
 import { presetReferences } from './references';
 import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
 import type { Preset, PresetKind } from './types';
@@ -72,6 +81,7 @@ export interface Finding {
     | 'redundant-overrides'
     | 'near-duplicate'
     | 'broken-parent'
+    | 'not-loaded'
     | 'circular-inherits'
     | 'orphaned-printer'
     | 'missing-reference'
@@ -120,11 +130,17 @@ export function analyze(index: ConfigIndex): Finding[] {
     });
   }
 
-  // Files that lose a name clash are never loaded, so every other observation
-  // about them is moot — reporting a dead file as "a detached copy" invites
-  // someone to go and fix a file the slicer has never read. The graph needs the
-  // same set, so the rule lives in `shadowedIds` rather than here.
-  const shadowed = shadowedIds(index);
+  // Files the slicer never loads, so every other observation about them is moot —
+  // reporting a dead file as "a detached copy" invites someone to go and fix a file
+  // the slicer has never read. The graph needs the same set, so the rule lives in
+  // `notLoadedPresets` rather than here.
+  //
+  // This is the suppression ORCA-17 is about, and it matters as much as the finding:
+  // a preset whose parent never loads has *only* its own values, so calling those
+  // "overrides that change nothing" is exactly backwards, and calling two such
+  // presets "identical in effect" asserts an equivalence about two files the slicer
+  // does not have.
+  const shadowed = notLoadedIds(index);
 
   // When a name is claimed more than once, a title using only the name is
   // ambiguous — say which file it is.
@@ -134,7 +150,32 @@ export function analyze(index: ConfigIndex): Finding[] {
     (nameCount.get(p.name) ?? 0) > 1 ? `${p.name} (${p.path.split('/').pop()})` : p.name;
 
   for (const p of userPresets) {
-    if (shadowed.has(p.id)) continue;
+    const failure = index.notLoaded.get(p.id);
+    // A clash loser is already reported once, as `duplicate-name`, with the winner
+    // named — a second finding about the same file would say less.
+    if (failure?.reason === 'name-clash') continue;
+
+    if (failure?.reason === 'bad-version') {
+      const declared = declaredVersion(p.raw);
+      findings.push({
+        id: `not-loaded:${p.id}`,
+        severity: 'high',
+        kind: 'not-loaded',
+        title: `${label(p)} is never loaded: ${declared === '' ? 'it has no `version`' : '`version` is not a version'}`,
+        detail:
+          `${
+            declared === ''
+              ? 'The file has no `version` key.'
+              : `\`version\` is "${declared}", which the slicer's version parser rejects — it needs at least \`major.minor\`, all numeric.`
+          } OrcaSlicer parses \`version\` before it does anything else with a user preset and skips the file when the parse fails, with no error and no log line (Preset.cpp:1653-1655). ` +
+          'So this preset is not selectable, nothing in it has any effect, and it cannot be inherited from. ' +
+          'Adding a valid `version` — the slicer writes one itself on every save — is the whole fix.',
+        presetIds: [p.id],
+        weight: 990,
+      });
+      continue;
+    }
+
     const { missingParent, circular } = inheritanceChain(index, p);
     const count = settingCount(p);
 
@@ -157,8 +198,15 @@ export function analyze(index: ConfigIndex): Finding[] {
         id: `broken:${p.id}`,
         severity: 'high',
         kind: 'broken-parent',
-        title: `${label(p)} inherits from a missing preset`,
-        detail: `It declares \`inherits: "${missingParent}"\`, but ${reasonClause(missingParent, r.reason, near)}. Every value that parent would have supplied is simply absent.`,
+        title:
+          r.reason === 'not-loaded'
+            ? `${label(p)} inherits from a preset the slicer does not load`
+            : `${label(p)} inherits from a missing preset`,
+        detail: `It declares \`inherits: "${missingParent}"\`, but ${reasonClause(missingParent, r.reason, near, near && index.notLoaded.get(near.id))}. ${
+          // The child is not partially loaded and then patched: `load_presets`
+          // `continue`s on it, so the whole preset is gone from the slicer.
+          'OrcaSlicer does not load the child either — it logs "can not find parent", counts an error and skips the file entirely (Preset.cpp:1686-1691) — so this preset is not selectable, and anything inheriting *it* fails the same way.'
+        }`,
         presetIds: [p.id],
         reference: {
           key: 'inherits',
@@ -167,6 +215,9 @@ export function analyze(index: ConfigIndex): Finding[] {
         },
         weight: 800,
       });
+      // `broken-parent` has said everything true about this file. What follows is
+      // advice about its contents, and its contents do not take effect.
+      continue;
     }
 
     if (!p.inherits && count >= DETACHED_KEY_THRESHOLD) {
@@ -266,7 +317,10 @@ function reasonsClause(
   if (unresolved.every((u) => u.reason === 'absent')) {
     return unresolved.length === 1 ? 'which is not installed' : 'none of which is installed';
   }
-  const clauses = unresolved.map((u) => reasonClause(u.name, u.reason, near(u)));
+  const clauses = unresolved.map((u) => {
+    const n = near(u);
+    return reasonClause(u.name, u.reason, n, n && index.notLoaded.get(n.id));
+  });
   return `but ${[...new Set(clauses)].join('; ')}`;
 }
 
@@ -276,8 +330,25 @@ function reasonsClause(
  * Every branch says what to do about it, because the three failures need three
  * different fixes and "not found" tells you which of them none of the time.
  */
-function reasonClause(name: string, reason: ReferenceReason, near: Preset | undefined): string {
+function reasonClause(
+  name: string,
+  reason: ReferenceReason,
+  near: Preset | undefined,
+  failure?: LoadFailure,
+): string {
   switch (reason) {
+    case 'not-loaded':
+      // The one case where "it is not installed" would be read as a lie: the file is
+      // in the folder the slicer loads, under the right name, and is still not there
+      // as far as the slicer is concerned. Say which gate it hit, because the fix is
+      // different for each.
+      return `the file that claims that name — ${near?.path ?? 'in this profile'} — is one OrcaSlicer skips${
+        failure?.reason === 'bad-version'
+          ? ', because its `version` does not parse and a user preset with an unparseable `version` is dropped silently (Preset.cpp:1653-1655). Give that file a valid `version` and this reference starts working'
+          : failure?.reason === 'parent-not-loaded'
+            ? `, because its own \`inherits\` (\`"${failure.parentName ?? ''}"\`) does not resolve, so it is skipped too (Preset.cpp:1686-1691). This chain has to be fixed from the top down — repairing the parent's parent repairs both`
+            : ', because it lost a name clash and was never loaded ("Preset already present, not loading", Preset.cpp:1619)'
+      }`;
     case 'unloaded-profile':
       return `a preset named "${name}" does exist, at ${near?.path ?? 'another user folder'} — in \`user/${near?.profile ?? '?'}\`, which OrcaSlicer does not load. Only one user folder is ever loaded (PresetBundle.cpp:528), so that file can never satisfy this reference and editing it changes nothing`;
     case 'wrong-kind':

@@ -66,6 +66,19 @@ test('loads a config and walks every tab without console errors', async ({ page 
   await expect(page.getByText('Pick a printer.')).toBeVisible();
   await page.getByLabel('Printer', { exact: true }).selectOption({ label: 'Workshop Cube · user' });
   await expect(page.getByRole('heading', { name: /Filaments/ })).toBeVisible();
+  // The dropdown's own sections, in its order and its words, so the two lists can
+  // be read side by side rather than reconciled row by row.
+  await expect(page.locator('.preset-group > summary .pg-title')).toContainText([
+    'User presets',
+    'System presets',
+    'Unsupported presets',
+    'Undetermined',
+    'Not installed',
+  ]);
+  // System filaments sit in a vendor submenu, which is what `Generic >` is.
+  await expect(page.locator('.preset-group .pg-sub').first()).toContainText('Acme');
+  // And a row is labelled with its alias, with the preset's own name beside it.
+  await expect(page.getByText('Acme PLA-CF', { exact: true }).first()).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/7-printer.png`, fullPage: true });
   // `undetermined` has to be its own state on screen, not a boolean with a caveat.
   await expect(page.locator('.compat-row.undetermined').first()).toBeVisible();
@@ -163,4 +176,57 @@ test('a link carries the view, and Back undoes the tab rather than every chip', 
   await page.goBack();
   await expect(page.getByRole('tab', { name: 'Health' })).toHaveAttribute('aria-selected', 'true');
   await expect(page).toHaveURL(/tab=health/);
+});
+
+test('the graph’s filters survive leaving the tab, and the all-off state has a way out', async ({
+  page,
+}) => {
+  // The reason ORCA-15 was sequenced behind ORCA-12. Until URL state landed, `App`
+  // unmounted `GraphView` on a tab change and the filter state died with it — which
+  // meant leaving the tab and coming back was the *only* escape from an all-off
+  // filter set. That escape hatch is gone now, so the on-screen one has to work.
+  await page.goto('/?tab=graph&gkinds=machine&gvendor=1');
+  await page.getByRole('button', { name: 'Load sample config' }).click();
+
+  const machine = page.getByRole('button', { name: 'machine', exact: true });
+  await expect(machine).toHaveAttribute('aria-pressed', 'true', { timeout: 15000 });
+  await expect(page.getByRole('button', { name: 'filament', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'false',
+  );
+  await expect(page.getByRole('button', { name: /include vendor-only subtrees/ })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+
+  // Leave and come back: the filters are still there, which is the whole point and
+  // was not true before.
+  await page.getByRole('tab', { name: 'Presets' }).click();
+  await page.getByRole('tab', { name: 'Graph' }).click();
+  await expect(machine).toHaveAttribute('aria-pressed', 'true');
+  await expect(page).toHaveURL(/gkinds=machine/);
+
+  // Turning the last kind off empties the diagram. The chips stay on screen and the
+  // notice offers the way back — without which this state is now a dead end.
+  await machine.click();
+  await expect(page).toHaveURL(/gkinds=(?:&|$)/);
+  await expect(page.getByText('No kinds selected.')).toBeVisible();
+  await expect(machine).toBeVisible();
+
+  // And it survives the unmount too, so the notice is the only exit.
+  await page.getByRole('tab', { name: 'Presets' }).click();
+  await page.getByRole('tab', { name: 'Graph' }).click();
+  await expect(page.getByText('No kinds selected.')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Show all three kinds' }).click();
+  await expect(machine).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.graph-node').first()).toBeVisible();
+
+  // Chips replace rather than push: one Back leaves the graph rather than unwinding
+  // the four clicks above.
+  await page.goBack();
+  await expect(page.getByRole('tab', { name: 'Presets' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
 });

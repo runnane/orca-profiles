@@ -59,9 +59,9 @@ stores **359 keys**, and the app reduces it to:
 | **121** overrides identical to the inherited value | pure noise |
 | **226** keys no ancestor defines | slicer built-in defaults, written out |
 
-## The four things that make a config lie to you
+## The five things that make a config lie to you
 
-All four are enforced by OrcaSlicer's own loader; line references are to
+All five are enforced by OrcaSlicer's own loader; line references are to
 [v2.4.2](https://github.com/SoftFever/OrcaSlicer/tree/v2.4.2/src/libslic3r).
 
 ### 1. Only one user folder is ever loaded
@@ -145,7 +145,45 @@ presets after the merge, and `compatible_printers` and the `default_*` keys are
 matched against those merged collections much later — a vendor filament naming
 another vendor's printer there is ordinary.
 
-### 4. The same value is written two different ways
+### 4. A user preset with no `version` is silently never loaded
+
+This one leaves no trace at all. Before the loader looks at `inherits`, it parses
+`version` and drops the preset when the parse fails:
+
+```cpp
+std::string version_str = key_values[BBL_JSON_KEY_VERSION];
+boost::optional<Semver> version = Semver::parse(version_str);
+if (!version) continue;
+```
+([Preset.cpp:1653](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1653))
+
+No log line, no error counted. And the string is `""` when the key is **absent**,
+because `key_values` only gains an entry for a key the file actually has
+([Config.cpp:885](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Config.cpp#L885)) —
+so a missing `version` reaches the parser as the empty string, which does not
+parse: the parser the slicer links needs **two to four numeric components**
+([semver.c:212](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/deps_src/semver/semver.c#L212)),
+so `""` and `"1"` both fail while `"1.9"` and `"01.09.00.02"` pass.
+
+The slicer writes a `version` on every save, so this only bites a file produced
+some other way — hand-edited, scripted, restored from a backup. Which is exactly
+when nobody expects it.
+
+**A dropped preset cannot be anyone's parent**, and that is what makes it worth a
+whole rule. Anything inheriting from one is skipped too, with `"can not find
+parent"`
+([Preset.cpp:1686](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1686)),
+and the failure cascades down the chain. The app models the cascade, and reports
+the child as `broken-parent` rather than describing its contents: with the parent
+never applied, every value in the child is the only value it has, so calling those
+"overrides that change nothing" — which is what a name-matching resolver
+concludes — is precisely backwards.
+
+Scoped to **user** presets. A vendor preset comes in through `parse_subfile`
+([PresetBundle.cpp:4836](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4836)),
+which has no version gate, so the rule must not be applied to them.
+
+### 5. The same value is written two different ways
 
 A preset saved by the slicer stores vector options as JSON arrays; one
 round-tripped through an export stores the serialised form:
@@ -215,6 +253,28 @@ and collapsed back on save, and `models` is an array of
 nothing about what is installed, and hiding presets on the strength of our own
 ignorance would be inventing an answer. The app says so instead, and the lists
 stay wide.
+
+### Reading it against the dropdown
+
+The Printer tab lays the result out the way OrcaSlicer's own filament combo box
+does, because a list you cannot check against the slicer is a list you have to
+take on trust: `User presets`, `System presets` — sub-grouped by
+`filament_vendor`, which is the `Generic >` submenu — then `Unsupported presets`
+([PresetComboBoxes.cpp:1421](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/slic3r/GUI/PresetComboBoxes.cpp#L1421)).
+Rows carry the **alias** the dropdown shows (`Generic PLA`, not
+`Generic PLA @System`) with the preset's own name beside it, and the row order
+copies the combo box's sort, hardcoded lists and all — which is why a `Generic`
+submenu opens PLA, PETG, ABS, TPU rather than alphabetically.
+
+Two groups are this app's own and are labelled as such: **not installed**, which
+the slicer simply omits, and **undetermined**, which it never produces because it
+evaluates every condition. Folding either into `Unsupported` would be claiming
+the slicer hides them.
+
+One thing that cannot be reproduced: the `*` prefix on a preset with unsaved
+edits. `Preset::label` adds it when `is_dirty`, which means "changed in the
+slicer and not yet written" — that state is in memory, never on disk, so no
+config reader can know it.
 
 ### Gate 2: compatible
 
@@ -369,9 +429,9 @@ only Chromium browsers have one at all.
 
 ## What it flags
 
-`detached` · `duplicate-name` (files never loaded) · `redundant-overrides` ·
-`near-duplicate` · `broken-parent` · `circular-inherits` · `orphaned-printer` ·
-`parse-error`
+`detached` · `duplicate-name` (files never loaded) · `not-loaded` (presets the
+slicer skips) · `redundant-overrides` · `near-duplicate` · `broken-parent` ·
+`circular-inherits` · `orphaned-printer` · `missing-reference` · `parse-error`
 
 ## Credentials
 
@@ -476,20 +536,32 @@ proves nothing, since loopback answers either way.
 
 ## Linking to a view
 
-The tab, the sidebar's search and filters, and the health kind filter are in the
-query string, so a view survives a reload — which in container mode is the normal
-way to pick up a changed config — and can be sent to someone with the same
-config:
+The tab, the sidebar's search and filters, the health kind filter and the graph's
+three filters are in the query string, so a view survives a reload — which in
+container mode is the normal way to pick up a changed config — and can be sent to
+someone with the same config:
 
 ```
 ?tab=health&health=duplicate-name
 ?q=draft&origins=user%2Csystem&inactive=1
+?tab=graph&gkinds=machine&gvendor=1&ginactive=1
 ```
+
+The graph's keys are `g`-prefixed because its kind filter is **not** the sidebar's:
+one picks what to list, the other what to draw, and a shared key would make each
+tab silently move the other.
 
 Only what differs from the default is written, so a fresh app has a bare URL and
 a link says exactly what it means. An unknown value falls back to the default
 rather than rendering nothing. Clicking chips replaces the history entry;
 changing tab adds one, so Back undoes the navigation and not each chip on the way.
+
+An **empty** set and an unreadable one are different: `?gkinds=` is every chip off,
+which is a real state a link has to survive, while `?gkinds=nonsense` is a broken
+link and falls back to the default. Turning every kind off used to be escapable
+only by leaving the tab — the state died with the unmounted component — so it is
+worth knowing that URL state removed that accident, and the notice with a way out
+on screen is what replaces it.
 
 **Which preset is open is deliberately not in there.** A preset id is its path, so
 that key would put a real preset or printer name into a string designed to be

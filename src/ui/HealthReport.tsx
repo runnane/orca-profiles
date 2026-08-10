@@ -21,6 +21,9 @@ const KIND_LABEL: Record<Finding['kind'], string> = {
   'redundant-overrides': 'Redundant overrides',
   'near-duplicate': 'Near-duplicates',
   'broken-parent': 'Missing parents',
+  // Distinct from "Files never loaded", which is the name-clash case: this one is a
+  // file nothing else is competing with, that the slicer skips on its own account.
+  'not-loaded': 'Presets the slicer skips',
   'circular-inherits': 'Inheritance loops',
   'orphaned-printer': 'Missing printers',
   'missing-reference': 'Dangling references',
