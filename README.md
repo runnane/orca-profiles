@@ -59,9 +59,9 @@ stores **359 keys**, and the app reduces it to:
 | **121** overrides identical to the inherited value | pure noise |
 | **226** keys no ancestor defines | slicer built-in defaults, written out |
 
-## The four things that make a config lie to you
+## The five things that make a config lie to you
 
-All four are enforced by OrcaSlicer's own loader; line references are to
+All five are enforced by OrcaSlicer's own loader; line references are to
 [v2.4.2](https://github.com/SoftFever/OrcaSlicer/tree/v2.4.2/src/libslic3r).
 
 ### 1. Only one user folder is ever loaded
@@ -114,7 +114,45 @@ collection at all
 ([PresetBundle.cpp:4929](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4929)),
 so two vendors shipping one is not a clash and is not reported as one.
 
-### 4. The same value is written two different ways
+### 4. A user preset with no `version` is silently never loaded
+
+This one leaves no trace at all. Before the loader looks at `inherits`, it parses
+`version` and drops the preset when the parse fails:
+
+```cpp
+std::string version_str = key_values[BBL_JSON_KEY_VERSION];
+boost::optional<Semver> version = Semver::parse(version_str);
+if (!version) continue;
+```
+([Preset.cpp:1653](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1653))
+
+No log line, no error counted. And the string is `""` when the key is **absent**,
+because `key_values` only gains an entry for a key the file actually has
+([Config.cpp:885](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Config.cpp#L885)) —
+so a missing `version` reaches the parser as the empty string, which does not
+parse: the parser the slicer links needs **two to four numeric components**
+([semver.c:212](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/deps_src/semver/semver.c#L212)),
+so `""` and `"1"` both fail while `"1.9"` and `"01.09.00.02"` pass.
+
+The slicer writes a `version` on every save, so this only bites a file produced
+some other way — hand-edited, scripted, restored from a backup. Which is exactly
+when nobody expects it.
+
+**A dropped preset cannot be anyone's parent**, and that is what makes it worth a
+whole rule. Anything inheriting from one is skipped too, with `"can not find
+parent"`
+([Preset.cpp:1686](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1686)),
+and the failure cascades down the chain. The app models the cascade, and reports
+the child as `broken-parent` rather than describing its contents: with the parent
+never applied, every value in the child is the only value it has, so calling those
+"overrides that change nothing" — which is what a name-matching resolver
+concludes — is precisely backwards.
+
+Scoped to **user** presets. A vendor preset comes in through `parse_subfile`
+([PresetBundle.cpp:4836](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4836)),
+which has no version gate, so the rule must not be applied to them.
+
+### 5. The same value is written two different ways
 
 A preset saved by the slicer stores vector options as JSON arrays; one
 round-tripped through an export stores the serialised form:
@@ -360,9 +398,9 @@ only Chromium browsers have one at all.
 
 ## What it flags
 
-`detached` · `duplicate-name` (files never loaded) · `redundant-overrides` ·
-`near-duplicate` · `broken-parent` · `circular-inherits` · `orphaned-printer` ·
-`parse-error`
+`detached` · `duplicate-name` (files never loaded) · `not-loaded` (presets the
+slicer skips) · `redundant-overrides` · `near-duplicate` · `broken-parent` ·
+`circular-inherits` · `orphaned-printer` · `missing-reference` · `parse-error`
 
 ## Credentials
 
