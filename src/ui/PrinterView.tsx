@@ -46,6 +46,7 @@ import {
   type Offering,
   type VisibilityReason,
 } from '../domain/compatibility';
+import { groupLikeSlicer, type PresetGroup } from '../domain/grouping';
 import type { ConfigIndex } from '../domain/index-config';
 import type { Preset } from '../domain/types';
 import { CodeText } from './CodeText';
@@ -293,6 +294,7 @@ export function PrinterView({
             list={result.filaments}
             only={only}
             machine={machine}
+            index={index}
             onSelect={onSelect}
           />
           <Section
@@ -300,6 +302,7 @@ export function PrinterView({
             list={result.processes}
             only={only}
             machine={machine}
+            index={index}
             onSelect={onSelect}
           />
         </>
@@ -313,16 +316,19 @@ function Section({
   list,
   only,
   machine,
+  index,
   onSelect,
 }: {
   title: string;
   list: Compatibility[];
   only: Offering | 'all';
   machine: Preset;
+  index: ConfigIndex;
   onSelect: (id: string) => void;
 }) {
   const s = compatibilitySummary(list);
   const visible = only === 'all' ? list : list.filter((c) => offering(c) === only);
+  const groups = useMemo(() => groupLikeSlicer(index, visible), [index, visible]);
 
   return (
     <section className="block">
@@ -334,27 +340,101 @@ function Section({
           {s.undetermined > 0 && ` · ${s.undetermined} undetermined`}
         </span>
       </h3>
-      {visible.length === 0 ? (
+      {groups.length === 0 ? (
         <p className="faint" style={{ margin: '4px 0 0' }}>
           Nothing in this group.
         </p>
       ) : (
-        <div className="compat-list">
-          {visible.map((c) => (
-            <Row key={c.preset.id} c={c} machine={machine} onSelect={onSelect} />
-          ))}
-        </div>
+        groups.map((g) => (
+          <Group
+            key={g.group}
+            g={g}
+            sole={groups.length === 1}
+            machine={machine}
+            onSelect={onSelect}
+          />
+        ))
       )}
     </section>
   );
 }
 
+/**
+ * One of the dropdown's sections.
+ *
+ * `<details>` rather than a custom disclosure: the slicer's submenus are closed
+ * until you open them, and a group of a thousand uninstalled presets has to be
+ * closed by default or it buries everything under it. The platform element gives
+ * keyboard operation and screen-reader semantics for free, and its open state
+ * survives re-renders without a store.
+ */
+function Group({
+  g,
+  sole,
+  machine,
+  onSelect,
+}: {
+  g: PresetGroup;
+  /** The only group on screen — a filter narrowed it to this one. */
+  sole: boolean;
+  machine: Preset;
+  onSelect: (id: string) => void;
+}) {
+  const count = g.subgroups.reduce((n, s) => n + s.items.length, 0);
+  // Size decides, not which group it is: the only one worth hiding is the
+  // thousand-row uninstalled list, and hiding a group of one would just be a
+  // click. A filter that narrowed the view to a single group always opens it —
+  // asking for the uninstalled presets and getting a closed box is a dead end.
+  const open = sole || count <= LARGE_GROUP;
+
+  return (
+    <details className={`preset-group${g.ours ? ' ours' : ''}`} open={open}>
+      <summary>
+        <span className="pg-title">{g.title}</span>
+        <span className="count">{count}</span>
+        {g.ours && (
+          <span className="gbadge" title="This app's own grouping — OrcaSlicer has no such section">
+            not a slicer group
+          </span>
+        )}
+      </summary>
+      {g.subgroups.map((sub) => (
+        <div key={sub.title} className="preset-subgroup">
+          {sub.title !== '' && (
+            <h4 className="pg-sub">
+              {sub.title}
+              <span className="count">{sub.items.length}</span>
+            </h4>
+          )}
+          <div className="compat-list">
+            {sub.items.map((p) => (
+              <Row
+                key={p.compatibility.preset.id}
+                c={p.compatibility}
+                label={p.label}
+                machine={machine}
+                onSelect={onSelect}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
+    </details>
+  );
+}
+
+/** Above this many rows a group starts closed, whoever it belongs to. */
+const LARGE_GROUP = 200;
+
 function Row({
   c,
+  label,
   machine,
   onSelect,
 }: {
   c: Compatibility;
+  /** The dropdown's label — the alias. The name still shows when they differ. */
+  label: string;
   machine: Preset;
   onSelect: (id: string) => void;
 }) {
@@ -381,7 +461,11 @@ function Row({
           <i className="dot" aria-hidden="true" />
           {VERDICT_LABEL[verdict]}
         </span>
-        <span className="cname">{c.preset.name}</span>
+        {/* The alias leads, because that is the row you are looking for when you
+            came from the slicer. The name follows when it differs, because it is
+            what identifies the *file* — and three presets can share one alias. */}
+        <span className="cname">{label}</span>
+        {label !== c.preset.name && <span className="calias">{c.preset.name}</span>}
         <span className="faint">{c.preset.origin}</span>
         {c.isPrinterDefault && (
           <span className="gbadge" title="Named by this printer's default_* keys">

@@ -66,6 +66,19 @@ test('loads a config and walks every tab without console errors', async ({ page 
   await expect(page.getByText('Pick a printer.')).toBeVisible();
   await page.getByLabel('Printer', { exact: true }).selectOption({ label: 'Workshop Cube · user' });
   await expect(page.getByRole('heading', { name: /Filaments/ })).toBeVisible();
+  // The dropdown's own sections, in its order and its words, so the two lists can
+  // be read side by side rather than reconciled row by row.
+  await expect(page.locator('.preset-group > summary .pg-title')).toContainText([
+    'User presets',
+    'System presets',
+    'Unsupported presets',
+    'Undetermined',
+    'Not installed',
+  ]);
+  // System filaments sit in a vendor submenu, which is what `Generic >` is.
+  await expect(page.locator('.preset-group .pg-sub').first()).toContainText('Acme');
+  // And a row is labelled with its alias, with the preset's own name beside it.
+  await expect(page.getByText('Acme PLA-CF', { exact: true }).first()).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/7-printer.png`, fullPage: true });
   // `undetermined` has to be its own state on screen, not a boolean with a caveat.
   await expect(page.locator('.compat-row.undetermined').first()).toBeVisible();

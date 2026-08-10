@@ -48,8 +48,12 @@ const acmeFilaments = [
   ['Shared PLA @System', { name: 'Shared PLA @System', inherits: 'fdm_filament_common', nozzle_temperature: '208' }],
   ['fdm_filament_common', { name: 'fdm_filament_common', instantiation: 'false', ...bulkSettings(1), nozzle_temperature: '200', filament_flow_ratio: '0.98' }],
   ['fdm_filament_abs', { name: 'fdm_filament_abs', instantiation: 'false', inherits: 'fdm_filament_common', nozzle_temperature: '250', hot_plate_temp: '90' }],
-  ['Acme ABS @System', { name: 'Acme ABS @System', inherits: 'fdm_filament_abs', setting_id: 'ACMEABS000000001', filament_max_volumetric_speed: '8' }],
-  ['Acme PLA @System', { name: 'Acme PLA @System', inherits: 'fdm_filament_common', setting_id: 'ACMEPLA000000001', nozzle_temperature: '215' }],
+  // `filament_vendor` and `filament_type` are what the dropdown sub-groups and
+  // orders system presets by (PresetComboBoxes.cpp:1222, :1330-1350). Stated on
+  // some and not others on purpose: a preset with no vendor goes under
+  // "Unspecified" rather than into a nameless submenu.
+  ['Acme ABS @System', { name: 'Acme ABS @System', inherits: 'fdm_filament_abs', setting_id: 'ACMEABS000000001', filament_vendor: 'Acme', filament_type: 'ABS', filament_max_volumetric_speed: '8' }],
+  ['Acme PLA @System', { name: 'Acme PLA @System', inherits: 'fdm_filament_common', setting_id: 'ACMEPLA000000001', filament_vendor: 'Acme', filament_type: 'PLA', nozzle_temperature: '215' }],
   // Installed under the name the loader *derives* rather than under its own. A
   // vendor preset with an `@` in its name and no `alias` of its own gets a
   // `renamed_from` of the name with the `@` deleted — "Acme PETG Cube", which is
