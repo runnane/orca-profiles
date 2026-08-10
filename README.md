@@ -134,7 +134,60 @@ worse failure.
 ## Which filaments a printer gets, and why
 
 Selecting a printer silently rewrites the filament and process lists, and the
-slicer never says on what grounds. The rule is
+slicer never says on what grounds. There are **two** gates, they are independent,
+and the dropdown requires both
+([Preset.cpp:3166](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L3166)):
+
+| Gate | Asks | Set by |
+|---|---|---|
+| `is_visible` | have you **installed** it? | `OrcaSlicer.conf`, never the preset file |
+| `is_compatible` | may it be used with **this printer**? | `compatible_printers` and its condition |
+
+### Gate 1: installed
+
+Conflate the two and you get this app's own worst bug: 320 filaments offered
+where the slicer offered 18. Every vendor's PLA is *compatible* with a printer
+that names no printers back, and almost none of it is installed.
+
+[`Preset::set_visible_from_appconfig`](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L853):
+
+- **Only vendor presets are gated.** `if (vendor == nullptr) return;` — and
+  `vendor` is set for exactly those loaded from a vendor bundle
+  ([PresetBundle.cpp:5057](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L5057)),
+  so **your own presets are always offered**. The filament library is a bundle
+  like any other, so `Generic PLA` *is* gated — it is in a real dropdown because
+  it is installed, not because it is generic.
+- **Filaments** are matched by name against the conf's `filaments`, `renamed_from`
+  included — and that list is partly derived: a preset named `X @Y` with no
+  `alias` of its own gets a `renamed_from` of the name with the `@` deleted
+  ([PresetBundle.cpp:5086](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L5086)).
+- **Printers** are matched on `(vendor id, printer_model, printer_variant)`
+  against the conf's `models`
+  ([AppConfig.cpp:1272](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/AppConfig.cpp#L1272)),
+  and not at all when either field is empty. So a printer preset can be absent
+  from the slicer's own printer list, which is why this app groups those
+  separately rather than listing them as ordinary choices.
+- **Processes are not gated at all.** The function handles printers, filaments and
+  SLA materials; a process is none of them.
+- **A printer is never left with nothing.** If no installed filament is compatible
+  with an installed printer, the slicer marks that printer model's
+  `default_materials` installed on your behalf and writes them back
+  ([PresetBundle.cpp:2541](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L2541)).
+
+The conf's shapes are not what the `AppConfig` API suggests: `filaments` is a JSON
+**array of names** on disk, expanded to a `name -> "true"` map on load
+([AppConfig.cpp:747](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/AppConfig.cpp#L747))
+and collapsed back on save, and `models` is an array of
+`{vendor, model, nozzle_diameter}` with the diameters `;`-separated.
+
+**No readable conf means no gate.** Absent is not empty: without that file we know
+nothing about what is installed, and hiding presets on the strength of our own
+ignorance would be inventing an answer. The app says so instead, and the lists
+stay wide.
+
+### Gate 2: compatible
+
+The rule is
 [`Preset::is_compatible_with_printer`](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L809),
 and it is checked in this order:
 
@@ -275,9 +328,17 @@ before serialising, so they never reach the browser at all — see
 worth keeping: the real file holds `access_code`, `user_access_code`, `dev_sn`,
 and a `local_machines` map **keyed by printer IP address** with device hostnames
 inside. A key that is itself the secret cannot be scrubbed by blanking values.
-The app needs exactly one field from that file — which user profile is live — so
-that is the only field served. This was found by diffing a real config against
-what the API returned; a fixture with blank credentials had reported it clean.
+This was found by diffing a real config against what the API returned; a fixture
+with blank credentials had reported it clean.
+
+Three fields are served: `app.preset_folder` (which profile is live), `filaments`
+and `models` (the installed gate above — preset and model names the `system/`
+files already carry). Each is **rebuilt field by field rather than forwarded**, so
+a key sitting next to one of them inside its own object cannot ride along, and
+`verify-deploy` asserts that per entry rather than only at the top level. A
+section that could not be read is **omitted, never emitted empty** — an empty
+`filaments` is the claim "nothing is installed", and manufacturing that claim out
+of a parse failure would empty every list in the app.
 
 ## Deploying
 
@@ -299,7 +360,9 @@ pnpm deploy --skip-gates            # when you just ran them
   ✓ health 200 · config dir /config
   ✓ SPA 200 · config 200 · 2608 files
   ✓ no value survives under any credential-bearing key
-  ✓ OrcaSlicer.conf reduced to { app: { preset_folder } }
+  ✓ OrcaSlicer.conf reduced to { app, filaments, models }
+  ✓ installed filaments served as 12 name(s), nothing else
+  ✓ installed models served as 2 entry(ies), three fields each
   ✓ no private IP addresses · no device hostnames in the payload
 ```
 
@@ -310,9 +373,9 @@ and get built into the next image.
 
 The verification is structural, not a search for known secrets, so it needs no
 access to the real config: it asserts that nothing survives under a
-credential-bearing key, that `OrcaSlicer.conf` came back reduced to its one
-allowlisted field, and that no address-shaped string appears anywhere in the
-payload. It is checked in the failing direction — pointed at a deliberately
+credential-bearing key, that `OrcaSlicer.conf` came back reduced to its
+allowlisted fields *and that each was rebuilt rather than forwarded*, and that no
+address-shaped string appears anywhere in the payload. It is checked in the failing direction — pointed at a deliberately
 leaky server it reports every one of those. A failed deploy leaves the previous
 container running.
 

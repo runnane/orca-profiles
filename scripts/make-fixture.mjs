@@ -50,6 +50,15 @@ const acmeFilaments = [
   ['fdm_filament_abs', { name: 'fdm_filament_abs', instantiation: 'false', inherits: 'fdm_filament_common', nozzle_temperature: '250', hot_plate_temp: '90' }],
   ['Acme ABS @System', { name: 'Acme ABS @System', inherits: 'fdm_filament_abs', setting_id: 'ACMEABS000000001', filament_max_volumetric_speed: '8' }],
   ['Acme PLA @System', { name: 'Acme PLA @System', inherits: 'fdm_filament_common', setting_id: 'ACMEPLA000000001', nozzle_temperature: '215' }],
+  // Installed under the name the loader *derives* rather than under its own. A
+  // vendor preset with an `@` in its name and no `alias` of its own gets a
+  // `renamed_from` of the name with the `@` deleted — "Acme PETG Cube", which is
+  // what the conf below lists (PresetBundle.cpp:5086-5093).
+  ['Acme PETG @Cube', { name: 'Acme PETG @Cube', inherits: 'fdm_filament_common', nozzle_temperature: '235' }],
+  // The same shape *with* an alias, which is the guard on that rule: the C++
+  // derives the old name only inside `if (alias_name.empty())`. The conf lists
+  // "Acme PLA-CF Cube" and this preset must still count as not installed.
+  ['Acme PLA-CF @Cube', { name: 'Acme PLA-CF @Cube', alias: 'Acme PLA-CF', inherits: 'fdm_filament_common', nozzle_temperature: '220' }],
 ];
 
 const acmeProcesses = [
@@ -84,6 +93,22 @@ const acmeMachines = [
       default_filament_profile: ['Acme PLA @System'],
     },
   ],
+  // The same model, the other variant — and the conf below installs only `0.4`.
+  // `is_visible` for a vendor printer is `get_variant(vendor, printer_model,
+  // printer_variant)` (Preset.cpp:859-864), so this preset is one OrcaSlicer does
+  // not offer at all: same vendor, same model, uninstalled nozzle.
+  [
+    'Acme Cube 0.6 nozzle',
+    {
+      name: 'Acme Cube 0.6 nozzle',
+      instantiation: 'true',
+      inherits: 'fdm_machine_common',
+      printer_model: 'Acme Cube',
+      printer_variant: '0.6',
+      nozzle_diameter: '0.6',
+      printer_notes: 'PRINTER_VENDOR_ACME\nPRINTER_MODEL_CUBE\nACME_CUBE_V1',
+    },
+  ],
 ];
 
 for (const [, p] of acmeFilaments) write(`system/Acme/filament/${p.name}.json`, p);
@@ -99,6 +124,10 @@ write('system/Acme/machine/Acme Cube.json', {
   nozzle_diameter: '0.4;0.6',
   machine_tech: 'FFF',
   family: 'Acme',
+  // What the slicer installs on the user's behalf when a printer would otherwise
+  // have no filament at all (`load_installed_filaments`,
+  // PresetBundle.cpp:2541-2600). Same `;`-separated form as `nozzle_diameter`.
+  default_materials: 'Acme PLA @System;Acme ABS @System',
 });
 
 write('system/Acme.json', {
@@ -113,7 +142,18 @@ write('system/Acme.json', {
 });
 
 const globexFilaments = [
-  ['Globex PETG @System', { name: 'Globex PETG @System', inherits: 'fdm_filament_common', nozzle_temperature: '240' }],
+  // Renamed by a vendor profile update: the conf still lists the old name, and
+  // `set_visible_from_appconfig` consults `renamed_from` for exactly this case
+  // (Preset.cpp:875-877), so it counts as installed under it.
+  [
+    'Globex PETG @System',
+    {
+      name: 'Globex PETG @System',
+      inherits: 'fdm_filament_common',
+      renamed_from: '"Globex PETG Legacy"',
+      nozzle_temperature: '240',
+    },
+  ],
   // The same name Acme ships below. Both are instantiable, so both end up in the
   // one collection the slicer keeps per preset type — and the merge discards
   // whichever arrives second ("Found duplicated preset", PresetBundle.cpp:2292).
@@ -474,6 +514,27 @@ write('OrcaSlicer.conf', {
     '192.0.2.10': { dev_ip: '192.0.2.10', dev_name: 'Workshop Cube', printer_type: 'acme-cube' },
   },
   presets: { filament: 'Studio ABS', print: 'Fast Draft' },
+  // The installed filaments — the `is_visible` gate. An array of names, which is
+  // the only form the slicer writes (AppConfig.cpp:966-973). Four kinds of entry
+  // on purpose: two presets installed under their own names, one under the name a
+  // vendor rename left behind, one under a *derived* old name, and one that names
+  // a preset which declares an alias and so must NOT match.
+  filaments: [
+    'Acme PLA @System',
+    'Acme ABS @System',
+    'Globex PETG Legacy',
+    'Acme PETG Cube',
+    'Acme PLA-CF Cube',
+  ],
+  // The installed printer models. `Acme Cube` declares `0.4;0.6` and only `0.4`
+  // is installed, so `Acme Cube 0.6 nozzle` is a preset the slicer never offers.
+  // The fourth field is not part of the shape the slicer reads
+  // (AppConfig.cpp:735-746) and is here to be dropped: `redactConfJson` rebuilds
+  // these entries field by field, and a hostile neighbour riding along inside one
+  // is precisely what that is for.
+  models: [
+    { vendor: 'Acme', model: 'Acme Cube', nozzle_diameter: '0.4', dev_ip: '192.0.2.77' },
+  ],
 });
 
 console.log(`fixture written to ${ROOT}`);

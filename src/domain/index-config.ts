@@ -27,6 +27,7 @@
  * path, so resolving a chain requires a name -> file map built from these.
  */
 
+import { readInstalled, type InstalledState } from './installed';
 import { parseQuotedList } from './normalize';
 import type { Preset, PresetKind, PresetScope, RawPreset } from './types';
 
@@ -82,6 +83,15 @@ export interface VendorModel {
   path: string;
   present: boolean;
   variants: string[];
+  /**
+   * The model's `default_materials`, a `;`-separated list sorted and deduped on
+   * load, with a leading empty entry dropped (PresetBundle.cpp:4788-4793).
+   *
+   * These are the filaments the slicer marks installed *on the user's behalf*
+   * when a printer would otherwise have none — see `load_installed_filaments`
+   * (PresetBundle.cpp:2541-2600) and the seeding rule in `compatibility.ts`.
+   */
+  defaultMaterials: string[];
 }
 
 export interface ConfigIndex {
@@ -102,6 +112,11 @@ export interface ConfigIndex {
   vendorRefs: VendorRef[];
   /** Printer models declared by the vendor indexes. */
   vendorModels: VendorModel[];
+  /**
+   * What `OrcaSlicer.conf` says the user has installed — the `is_visible` gate,
+   * which is independent of compatibility and applies only to vendor presets.
+   */
+  installed: InstalledState;
   /** Files that were present but could not be parsed. */
   parseErrors: { path: string; message: string }[];
 }
@@ -123,11 +138,21 @@ function kindFromPath(path: string): PresetKind | undefined {
  * of, so a model file we cannot read yields none rather than guessing.
  */
 function readVariants(text: string): string[] {
+  return readList(text, 'nozzle_diameter');
+}
+
+/**
+ * A `;`-separated list field out of a printer model file. `default_materials` is
+ * read the same way `nozzle_diameter` is — both go through
+ * `unescape_strings_cstyle` (PresetBundle.cpp:4739-4747, :4788-4793) — so they
+ * share one reader rather than two that could drift.
+ */
+function readList(text: string, key: string): string[] {
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
-    const nd = parsed.nozzle_diameter;
-    if (typeof nd === 'string') return parseQuotedList(nd).filter((v) => v !== '');
-    if (Array.isArray(nd)) return nd.map(String).filter((v) => v !== '');
+    const v = parsed[key];
+    if (typeof v === 'string') return parseQuotedList(v).filter((x) => x !== '');
+    if (Array.isArray(v)) return v.map(String).filter((x) => x !== '');
     return [];
   } catch {
     return [];
@@ -237,6 +262,7 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
           path: target,
           present: file !== undefined,
           variants: file ? readVariants(file.text) : [],
+          defaultMaterials: file ? readList(file.text, 'default_materials') : [],
         });
       }
     }
@@ -330,6 +356,7 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
     vendors: [...vendors].sort(),
     vendorRefs,
     vendorModels,
+    installed: readInstalled(files),
     parseErrors,
   };
 }

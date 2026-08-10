@@ -59,13 +59,49 @@
  * settings plus the injected `printer_preset` / `num_extruders`
  * (Preset.cpp:845-849), while `compatible_prints_condition` is evaluated against
  * the **process's** config with no extras (Preset.cpp:782).
+ *
+ * ## The other gate: installed, which is not compatibility
+ *
+ * All of the above is `is_compatible`, and it is only half of what the dropdown
+ * applies. The other half is `is_visible` — whether the preset is *installed* —
+ * and the combo box requires both: `it_preset->is_visible && (it_preset->is_compatible
+ * || <selected>)` (Preset.cpp:3166-3168). They are independent, and conflating
+ * them is how this app came to offer 320 filaments where the slicer offered 18:
+ * every vendor's PLA is compatible with a printer that names no printers back,
+ * and almost none of them are installed.
+ *
+ * `Preset::set_visible_from_appconfig` (Preset.cpp:853-882) decides it, and the
+ * shape of that function is the shape of `visibilityIndex` below:
+ *
+ *  - **`if (vendor == nullptr) return;`** — a preset with no vendor keeps the
+ *    visibility it loaded with, which for a user preset is `true`
+ *    (Preset.cpp:2892, :2921). Only vendor presets are gated, and `vendor` is set
+ *    for exactly those loaded out of a vendor bundle (PresetBundle.cpp:5057). The
+ *    filament library is a vendor bundle like any other, so `Generic PLA` is
+ *    gated too — it appears in a real dropdown because it is installed, not
+ *    because it is special.
+ *  - **Filaments** are gated by *name* against the conf's `filaments` section,
+ *    `renamed_from` included (Preset.cpp:866-878).
+ *  - **Printers** are gated by `get_variant(vendor->id, printer_model,
+ *    printer_variant)`, and not at all when either field is empty
+ *    (Preset.cpp:859-864).
+ *  - **Processes are not gated.** The function handles `TYPE_PRINTER`,
+ *    `TYPE_FILAMENT` and `TYPE_SLA_MATERIAL`, and a process is none of them, so
+ *    its `instantiation`-derived visibility (Preset.cpp:1663) stands. A process
+ *    list is decided by compatibility alone.
+ *
+ * `included` below therefore stays exactly `is_compatible` and says nothing about
+ * installation; `visibility` is the second flag, reported beside it rather than
+ * folded into it. `offering()` combines them the way the combo box does, and is
+ * the only thing that should decide what a caller shows as a verdict.
  */
 
 import { evaluateCondition, printerInjectedVars, type ConditionContext } from './condition';
 import { shadowedIds, type ConfigIndex } from './index-config';
+import { hasVariant } from './installed';
 import { referenceNames } from './references';
 import { resolve } from './resolve';
-import type { Preset, RawValue } from './types';
+import type { Preset, RawValue, ResolvedSetting } from './types';
 
 /** The vendor whose filaments carry the derived exclusion list. */
 const FILAMENT_LIBRARY = 'OrcaFilamentLibrary';
@@ -92,12 +128,60 @@ export interface CompatibilityEvidence {
   value: string;
 }
 
+/** Why a preset is or is not installed. */
+export type VisibilityReason =
+  /** Not subject to the gate: a user preset, or a process. */
+  | 'not-gated'
+  /** Named in the conf's `filaments` section. */
+  | 'installed'
+  /** Not named, but a name in its `renamed_from` is. */
+  | 'installed-under-old-name'
+  /** Not named by the user; the slicer installs it as a printer's default. */
+  | 'installed-as-default'
+  /** A vendor filament the user has not added. */
+  | 'not-installed'
+  /** This printer's model and variant are in the conf's `models`. */
+  | 'variant-installed'
+  /** They are not, so the slicer does not offer this printer either. */
+  | 'variant-not-installed'
+  /** A vendor printer with no `printer_model`/`printer_variant` to gate on. */
+  | 'no-variant-declared'
+  /** There was no readable `OrcaSlicer.conf`, so the gate cannot be applied. */
+  | 'config-unreadable';
+
+/**
+ * `is_visible`: the installed gate, independent of compatibility.
+ *
+ * Kept as its own value rather than folded into `included` because the two have
+ * different causes and different fixes — "OrcaSlicer will not let you use this
+ * filament with this printer" and "you never added this filament" are different
+ * sentences, and only the first is about `compatible_printers`.
+ */
+export interface Visibility {
+  visible: boolean;
+  reason: VisibilityReason;
+  evidence: CompatibilityEvidence;
+}
+
+/** Not gated at all, which is the answer for every user preset and every process. */
+const NOT_GATED: Visibility = {
+  visible: true,
+  reason: 'not-gated',
+  evidence: { key: 'vendor', value: '' },
+};
+
 export interface Compatibility {
   preset: Preset;
-  /** `'undetermined'` is a value, not a boolean with a caveat. */
+  /**
+   * `is_compatible` alone. `'undetermined'` is a value, not a boolean with a
+   * caveat. This says nothing about whether the preset is installed — read
+   * `offering()` for what the slicer would actually put in the list.
+   */
   included: boolean | 'undetermined';
   reason: CompatibilityReason;
   evidence: CompatibilityEvidence;
+  /** `is_visible`: the second, independent gate. */
+  visibility: Visibility;
   /**
    * The printer's `default_print_profile` / `default_filament_profile` names it.
    * Not part of the verdict — see the module note.
@@ -194,6 +278,238 @@ function libraryExclusions(index: ConfigIndex): Map<string, Set<string>> {
   return out;
 }
 
+/**
+ * The context a `compatible_printers_condition` is evaluated in: the printer's
+ * *resolved* settings, so an inherited `printer_notes` is in scope, plus the two
+ * variables the slicer injects rather than reads (Preset.cpp:845-849).
+ */
+function printerContext(
+  settings: Map<string, ResolvedSetting>,
+  machineName: string,
+): ConditionContext {
+  return {
+    lookup: (key: string): RawValue | undefined => settings.get(key)?.value,
+    injected: printerInjectedVars(machineName, settings.get('nozzle_diameter')?.value),
+  };
+}
+
+/** A resolved setting as a trimmed string, which is what `opt_string` yields. */
+function settingText(settings: Map<string, ResolvedSetting>, key: string): string {
+  const v = settings.get(key)?.value;
+  if (v === undefined) return '';
+  return Array.isArray(v) ? String(v[0] ?? '').trim() : String(v).trim();
+}
+
+/**
+ * The names this preset may be installed under besides its own.
+ *
+ * Two sources, and the second is easy to miss. A vendor bundle may state
+ * `renamed_from` outright (PresetBundle.cpp:4947), and when it does not, the
+ * loader *derives* one for any preset whose name contains `@` and which declares
+ * no `alias` of its own: the name with the `@` character removed
+ * (PresetBundle.cpp:5086-5093). Both are consulted by
+ * `set_visible_from_appconfig` (Preset.cpp:875-877), so a config that still lists
+ * a preset under its pre-rename name keeps showing it.
+ */
+function renamedFrom(p: Preset): string[] {
+  const explicit = referenceNames(p.raw, 'renamed_from');
+  if (explicit.length > 0) return explicit;
+  // The derived name exists only when the bundle stated no alias: the C++ builds
+  // it inside `if (alias_name.empty())`.
+  const alias = typeof p.raw.alias === 'string' ? p.raw.alias : '';
+  if (alias !== '') return [];
+  const at = p.name.indexOf('@');
+  if (at < 0) return [];
+  // `alias_name + preset_name.substr(end_pos + 1)` — and `alias_name` is not
+  // trimmed until after this line, so the space before the `@` survives.
+  return [p.name.slice(0, at) + p.name.slice(at + 1)];
+}
+
+/**
+ * `Preset::set_visible_from_appconfig` for one vendor printer preset.
+ *
+ * Exported because the printer *picker* needs it: a system printer whose variant
+ * is not installed is not in the slicer's printer list either, and offering it
+ * as something to explain would be describing a machine the user cannot select.
+ */
+export function machineVisibility(index: ConfigIndex, machine: Preset): Visibility {
+  if (machine.kind !== 'machine' || machine.origin !== 'system' || !machine.vendor) return NOT_GATED;
+  return machineVisibilityFrom(index, machine, resolve(index, machine).settings);
+}
+
+function machineVisibilityFrom(
+  index: ConfigIndex,
+  machine: Preset,
+  settings: Map<string, ResolvedSetting>,
+): Visibility {
+  if (!index.installed.present) return CONFIG_UNREADABLE;
+  const model = settingText(settings, 'printer_model');
+  const variant = settingText(settings, 'printer_variant');
+  // `if (model.empty() || variant.empty()) return;` — the function leaves
+  // `is_visible` alone, and for a bundle preset that is `instantiation != "false"`
+  // (Preset.cpp:1663), i.e. true for anything selectable at all.
+  if (model === '' || variant === '') {
+    return {
+      visible: true,
+      reason: 'no-variant-declared',
+      evidence: { key: model === '' ? 'printer_model' : 'printer_variant', value: '' },
+    };
+  }
+  const installed = hasVariant(index.installed, machine.vendor ?? '', model, variant);
+  return {
+    visible: installed,
+    reason: installed ? 'variant-installed' : 'variant-not-installed',
+    evidence: { key: 'models', value: `${machine.vendor ?? ''} · ${model} · ${variant}` },
+  };
+}
+
+/** No conf, so no gate — never a verdict of "not installed" on our own ignorance. */
+const CONFIG_UNREADABLE: Visibility = {
+  visible: true,
+  reason: 'config-unreadable',
+  evidence: { key: 'OrcaSlicer.conf', value: '' },
+};
+
+/**
+ * The filaments the slicer installs on the user's behalf.
+ *
+ * `load_installed_filaments` (PresetBundle.cpp:2541-2600) runs on every start,
+ * after printer visibility is settled (`load_installed_printers` first,
+ * PresetBundle.cpp:2726-2730). For each **visible, FFF, vendor** printer whose
+ * vendor declares models, it asks whether *any* installed filament is compatible
+ * with that printer; if none is, it adds that printer model's `default_materials`
+ * — system presets only — to the installed set and writes them back to the conf.
+ *
+ * So on any config that has been opened once this returns nothing: the names are
+ * already in `filaments`. It matters for the config that has never been opened,
+ * and for a printer whose installed filaments all exclude it — where without it
+ * this app would report a printer with no filaments at all, which the slicer
+ * never shows anyone.
+ *
+ * `undetermined` counts as compatible here. The C++ has no such state — a
+ * condition it cannot evaluate returns "compatible with everything"
+ * (Preset.cpp:832-835) — so treating it as compatible follows the source, and it
+ * is also the narrower answer: it suppresses seeding rather than inventing
+ * installs.
+ */
+function seededFilaments(index: ConfigIndex, exclusions: Map<string, Set<string>>): Set<string> {
+  const out = new Set<string>();
+  if (!index.installed.present) return out;
+
+  const vendorHasModels = new Set(index.vendorModels.map((m) => m.vendor));
+  const activeNamed = (name: string, kind: Preset['kind']) =>
+    (index.byName.get(name) ?? []).filter((p) => p.kind === kind && p.scope === 'active');
+
+  for (const machine of index.active) {
+    if (machine.kind !== 'machine' || machine.origin !== 'system' || !machine.vendor) continue;
+    // `printer.vendor && (! printer.vendor->models.empty())`.
+    if (!vendorHasModels.has(machine.vendor)) continue;
+
+    const settings = resolve(index, machine).settings;
+    // `printer.printer_technology() == ptFFF`. The option defaults to FFF, and
+    // OrcaSlicer's SLA path is vestigial, so only an explicit SLA opts out.
+    if (settingText(settings, 'printer_technology').toUpperCase() === 'SLA') continue;
+    if (!machineVisibilityFrom(index, machine, settings).visible) continue;
+
+    const ctx = printerContext(settings, machine.name);
+    const anyInstalledFits = [...index.installed.filaments].some((name) =>
+      activeNamed(name, 'filament').some(
+        (f) => judgePrinter(f, machine, exclusions, ctx).included !== false,
+      ),
+    );
+    if (anyInstalledFits) continue;
+
+    const model = settingText(settings, 'printer_model');
+    const declared = index.vendorModels.find(
+      (m) => m.vendor === machine.vendor && m.id === model,
+    );
+    // `if (!printer_model) continue;` — nothing to take defaults from.
+    if (!declared) continue;
+    for (const name of declared.defaultMaterials) {
+      // `if (filament && filament->is_system)`.
+      for (const f of activeNamed(name, 'filament')) {
+        if (f.origin === 'system') out.add(f.name);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * `is_visible` for every preset in the config, keyed by id.
+ *
+ * One pass, so the seeding above is computed once rather than per preset.
+ */
+export function visibilityIndex(index: ConfigIndex): Map<string, Visibility> {
+  const out = new Map<string, Visibility>();
+  const seeded = seededFilaments(index, libraryExclusions(index));
+  const installed = index.installed;
+
+  for (const p of index.presets) {
+    // `if (vendor == nullptr) { return; }` — and a process is not a type the
+    // function handles at all.
+    if (p.origin !== 'system' || !p.vendor || p.kind === 'process') {
+      out.set(p.id, NOT_GATED);
+      continue;
+    }
+    if (!installed.present) {
+      out.set(p.id, CONFIG_UNREADABLE);
+      continue;
+    }
+    if (p.kind === 'machine') {
+      out.set(p.id, machineVisibilityFrom(index, p, resolve(index, p).settings));
+      continue;
+    }
+    if (installed.filaments.has(p.name)) {
+      out.set(p.id, {
+        visible: true,
+        reason: 'installed',
+        evidence: { key: 'filaments', value: p.name },
+      });
+      continue;
+    }
+    const oldName = renamedFrom(p).find((n) => installed.filaments.has(n));
+    if (oldName !== undefined) {
+      out.set(p.id, {
+        visible: true,
+        reason: 'installed-under-old-name',
+        evidence: { key: 'renamed_from', value: oldName },
+      });
+      continue;
+    }
+    if (seeded.has(p.name)) {
+      out.set(p.id, {
+        visible: true,
+        reason: 'installed-as-default',
+        evidence: { key: 'default_materials', value: p.name },
+      });
+      continue;
+    }
+    out.set(p.id, {
+      visible: false,
+      reason: 'not-installed',
+      evidence: { key: 'filaments', value: p.name },
+    });
+  }
+  return out;
+}
+
+/**
+ * What the slicer would do with this preset, both gates folded in the order the
+ * combo box folds them (Preset.cpp:3166-3168).
+ *
+ * `never-loaded` comes first: a file the slicer never read is not "not
+ * installed", and saying so would point at the wrong fix.
+ */
+export type Offering = 'available' | 'excluded' | 'not-installed' | 'undetermined';
+
+export function offering(c: Compatibility): Offering {
+  if (c.reason === 'never-loaded') return 'excluded';
+  if (!c.visibility.visible) return 'not-installed';
+  if (c.included === 'undetermined') return 'undetermined';
+  return c.included ? 'available' : 'excluded';
+}
+
 export function compatibilityFor(
   index: ConfigIndex,
   machine: Preset,
@@ -201,14 +517,10 @@ export function compatibilityFor(
 ): PrinterCompatibility {
   const dead = shadowedIds(index);
   const exclusions = libraryExclusions(index);
+  const visibility = visibilityIndex(index);
 
-  // The printer's *resolved* settings, so an inherited `printer_notes` is visible
-  // to a condition, plus the two variables the slicer injects rather than reads.
   const machineSettings = resolve(index, machine).settings;
-  const printerCtx: ConditionContext = {
-    lookup: (key) => machineSettings.get(key)?.value,
-    injected: printerInjectedVars(machine.name, machineSettings.get('nozzle_diameter')?.value),
-  };
+  const printerCtx = printerContext(machineSettings, machine.name);
 
   const defaultProcesses = new Set(referenceNames(machine.raw, 'default_print_profile'));
   const defaultFilaments = new Set(referenceNames(machine.raw, 'default_filament_profile'));
@@ -216,7 +528,11 @@ export function compatibilityFor(
   const judge = (p: Preset): Compatibility => {
     const isDefault =
       p.kind === 'process' ? defaultProcesses.has(p.name) : defaultFilaments.has(p.name);
-    const base = { preset: p, isPrinterDefault: isDefault };
+    const base = {
+      preset: p,
+      isPrinterDefault: isDefault,
+      visibility: visibility.get(p.id) ?? NOT_GATED,
+    };
 
     if (dead.has(p.id) || p.scope !== 'active') {
       return {
@@ -357,15 +673,24 @@ function conditionOf(p: Preset, key: string): string | undefined {
   return text === '' ? undefined : text;
 }
 
-/** Counts for a one-line summary, without re-deriving any of the rule. */
+/**
+ * Counts for a one-line summary, without re-deriving any of the rule.
+ *
+ * Every count comes from `offering`, the same function a caller uses to label a
+ * row, so a header can never disagree with the list under it. `yes` is therefore
+ * what the slicer would offer — not what merely passes `compatible_printers`.
+ */
 export function compatibilitySummary(list: Compatibility[]): {
   yes: number;
   no: number;
   undetermined: number;
+  notInstalled: number;
 } {
+  const of = list.map(offering);
   return {
-    yes: list.filter((c) => c.included === true).length,
-    no: list.filter((c) => c.included === false).length,
-    undetermined: list.filter((c) => c.included === 'undetermined').length,
+    yes: of.filter((o) => o === 'available').length,
+    no: of.filter((o) => o === 'excluded').length,
+    undetermined: of.filter((o) => o === 'undetermined').length,
+    notInstalled: of.filter((o) => o === 'not-installed').length,
   };
 }

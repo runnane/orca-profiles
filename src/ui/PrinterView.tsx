@@ -21,35 +21,61 @@
  *  - **`named-via-parent` is spelled out.** "Available because this printer
  *    inherits from X, which the filament names" is the most surprising sentence in
  *    the feature and the one that stops a bug report being filed.
+ *  - **"not installed" is its own verdict, above the compatibility one.** It is a
+ *    different gate with a different fix — Add/Remove filament, not
+ *    `compatible_printers` — so a row says which of the two stopped it, and shows
+ *    the compatibility verdict underneath as the answer to "and if I did install
+ *    it?".
  *
  * Colour follows the graph view's precedent: status only, from the reserved
  * palette, and **always with the word** — a verdict is never conveyed by colour
- * alone. Rows are ordinary buttons, so keyboard navigation and screen-reader
- * semantics come from the platform rather than from a widget.
+ * alone. "Not installed" takes no status colour at all, because absence is
+ * neither a fault nor a warning. Rows are ordinary buttons, so keyboard
+ * navigation and screen-reader semantics come from the platform rather than from
+ * a widget.
  */
 
 import { useMemo, useState } from 'react';
 import {
   compatibilityFor,
   compatibilitySummary,
+  offering,
+  visibilityIndex,
   type Compatibility,
   type CompatibilityReason,
+  type Offering,
+  type VisibilityReason,
 } from '../domain/compatibility';
 import type { ConfigIndex } from '../domain/index-config';
 import type { Preset } from '../domain/types';
 import { CodeText } from './CodeText';
 import { plainText } from './text';
 
-type Verdict = 'available' | 'excluded' | 'undetermined';
-
-function verdictOf(c: Compatibility): Verdict {
-  return c.included === true ? 'available' : c.included === false ? 'excluded' : 'undetermined';
-}
-
-const VERDICT_LABEL: Record<Verdict, string> = {
+const VERDICT_LABEL: Record<Offering, string> = {
   available: 'available',
   excluded: 'excluded',
   undetermined: 'undetermined',
+  'not-installed': 'not installed',
+};
+
+/**
+ * Why a preset is not installed, in the second person. Only the reasons that can
+ * reach a row are here: the visible ones never produce a verdict of their own, so
+ * they are explained as a note beside the compatibility sentence instead.
+ */
+const NOT_INSTALLED_TEXT: Partial<Record<VisibilityReason, string>> = {
+  'not-installed':
+    'You have not added this filament in OrcaSlicer, so it is not in the list at all — whatever its `compatible_printers` says. “Add/Remove filament” is what changes this.',
+  'variant-not-installed':
+    'This printer model and nozzle are not among the ones you added, so OrcaSlicer does not offer this printer either.',
+};
+
+/** The note under an *installed* row, when something other than the user installed it. */
+const INSTALLED_NOTE: Partial<Record<VisibilityReason, string>> = {
+  'installed-under-old-name':
+    'Installed under an earlier name of this preset, which its `renamed_from` still claims.',
+  'installed-as-default':
+    'Installed by OrcaSlicer rather than by you: this printer model lists it in `default_materials`, and a printer is never left with no filament at all.',
 };
 
 /**
@@ -69,7 +95,22 @@ const REASON_TEXT: Record<Exclude<CompatibilityReason, 'condition'>, string> = {
     'Another file claimed this name first, so OrcaSlicer never loads this one at all.',
 };
 
+/**
+ * The sentence a row leads with: the gate that actually stopped it. `offering`
+ * decides which that is, so the wording can never disagree with the verdict word
+ * beside it.
+ */
 function explain(c: Compatibility, machine: Preset): string {
+  if (offering(c) === 'not-installed') {
+    return (
+      NOT_INSTALLED_TEXT[c.visibility.reason] ??
+      `Not installed, decided by \`${c.visibility.evidence.key}\`.`
+    );
+  }
+  return explainCompatibility(c, machine);
+}
+
+function explainCompatibility(c: Compatibility, machine: Preset): string {
   if (c.reason === 'condition') {
     if (c.included === 'undetermined') {
       return 'It has no `compatible_printers` list, so a condition decides — and this one is outside the subset this app evaluates. The expression is below, verbatim.';
@@ -97,19 +138,26 @@ export function PrinterView({
   onSelect: (id: string) => void;
 }) {
   const [processId, setProcessId] = useState('');
-  const [only, setOnly] = useState<Verdict | 'all'>('all');
+  const [only, setOnly] = useState<Offering | 'all'>('all');
 
-  const machines = useMemo(
-    () =>
-      index.active
-        .filter((p) => p.kind === 'machine')
-        .sort(
-          (a, b) =>
-            Number(a.origin === 'system') - Number(b.origin === 'system') ||
-            a.name.localeCompare(b.name, 'en'),
-        ),
-    [index],
-  );
+  const visibility = useMemo(() => visibilityIndex(index), [index]);
+
+  // Split rather than filtered: a vendor printer whose model/variant the user
+  // never added is not in OrcaSlicer's printer list either, so it does not belong
+  // beside the ones that are — but this app explains configs, and dropping it
+  // outright would leave "why is this printer not offered" unanswerable. It goes
+  // in a second group, named.
+  const machines = useMemo(() => {
+    const all = index.active
+      .filter((p) => p.kind === 'machine')
+      .sort(
+        (a, b) =>
+          Number(a.origin === 'system') - Number(b.origin === 'system') ||
+          a.name.localeCompare(b.name, 'en'),
+      );
+    const offered = (p: Preset) => visibility.get(p.id)?.visible !== false;
+    return { offered: all.filter(offered), notOffered: all.filter((p) => !offered(p)) };
+  }, [index, visibility]);
 
   const machine = machineId ? index.byId.get(machineId) : undefined;
   const process = processId ? index.byId.get(processId) : undefined;
@@ -119,7 +167,7 @@ export function PrinterView({
     [index, machine, process],
   );
 
-  if (machines.length === 0) {
+  if (machines.offered.length + machines.notOffered.length === 0) {
     return <div className="notice">This config has no printer presets to explain.</div>;
   }
 
@@ -134,11 +182,20 @@ export function PrinterView({
           </label>
           <select id="printer-pick" value={machineId} onChange={(e) => onPickMachine(e.target.value)}>
             <option value="">Choose a printer…</option>
-            {machines.map((m) => (
+            {machines.offered.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name} · {m.origin}
               </option>
             ))}
+            {machines.notOffered.length > 0 && (
+              <optgroup label="Not installed — OrcaSlicer does not offer these">
+                {machines.notOffered.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name} · {m.origin}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
         </div>
         <div>
@@ -148,7 +205,7 @@ export function PrinterView({
           <select id="process-pick" value={processId} onChange={(e) => setProcessId(e.target.value)}>
             <option value="">Printer only — ignore the process gate</option>
             {result?.processes
-              .filter((c) => c.included === true)
+              .filter((c) => offering(c) === 'available')
               .map((c) => (
                 <option key={c.preset.id} value={c.preset.id}>
                   {c.preset.name}
@@ -165,6 +222,21 @@ export function PrinterView({
         </div>
       ) : (
         <>
+          {!index.installed.present && (
+            <div className="notice">
+              <strong>No readable <code>OrcaSlicer.conf</code> here.</strong> That file is the only
+              record of which presets you have actually <em>installed</em>, and OrcaSlicer requires
+              installed <em>and</em> compatible before it offers anything. Without it these lists are
+              the compatibility half only, so they are wider than the slicer&rsquo;s.
+            </div>
+          )}
+          {visibility.get(machine.id)?.visible === false && (
+            <div className="notice">
+              <strong>This printer is not installed.</strong> Its model and nozzle are not in{' '}
+              <code>OrcaSlicer.conf</code>&rsquo;s <code>models</code>, so OrcaSlicer does not offer{' '}
+              {machine.name} at all. What follows is what it <em>would</em> get.
+            </div>
+          )}
           <p className="muted" style={{ marginTop: 0 }}>
             What <strong>{machine.name}</strong> gets.
             {process ? (
@@ -185,7 +257,7 @@ export function PrinterView({
           </p>
 
           <div className="chips" style={{ marginBottom: 12 }}>
-            {(['all', 'available', 'excluded', 'undetermined'] as const).map((v) => (
+            {(['all', 'available', 'not-installed', 'excluded', 'undetermined'] as const).map((v) => (
               <button
                 key={v}
                 type="button"
@@ -227,19 +299,20 @@ function Section({
 }: {
   title: string;
   list: Compatibility[];
-  only: Verdict | 'all';
+  only: Offering | 'all';
   machine: Preset;
   onSelect: (id: string) => void;
 }) {
   const s = compatibilitySummary(list);
-  const visible = only === 'all' ? list : list.filter((c) => verdictOf(c) === only);
+  const visible = only === 'all' ? list : list.filter((c) => offering(c) === only);
 
   return (
     <section className="block">
       <h3>
         {title}
         <span className="count">
-          {s.yes} available · {s.no} excluded
+          {s.yes} available
+          {s.notInstalled > 0 && ` · ${s.notInstalled} not installed`} · {s.no} excluded
           {s.undetermined > 0 && ` · ${s.undetermined} undetermined`}
         </span>
       </h3>
@@ -267,8 +340,13 @@ function Row({
   machine: Preset;
   onSelect: (id: string) => void;
 }) {
-  const verdict = verdictOf(c);
+  const verdict = offering(c);
   const gate = c.processGate;
+  // For a row the installed gate stopped, the compatibility verdict is still the
+  // answer to "and if I install it?" — so it moves to a note rather than being
+  // dropped. `installedNote` is the mirror case: installed, but not by the user.
+  const wouldBe = verdict === 'not-installed' ? explainCompatibility(c, machine) : undefined;
+  const installedNote = wouldBe ? undefined : INSTALLED_NOTE[c.visibility.reason];
 
   return (
     <button
@@ -296,7 +374,17 @@ function Row({
       <span className="compat-why">
         <CodeText text={explain(c, machine)} />
       </span>
-      {c.reason === 'condition' && (
+      {wouldBe && (
+        <span className="compat-gate">
+          Once installed — <CodeText text={wouldBe} />
+        </span>
+      )}
+      {installedNote && (
+        <span className="compat-gate">
+          <CodeText text={installedNote} />
+        </span>
+      )}
+      {c.reason === 'condition' && verdict !== 'not-installed' && (
         <span className="compat-expr mono">{c.evidence.value}</span>
       )}
       {gate && (

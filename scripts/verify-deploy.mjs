@@ -7,8 +7,9 @@
  * The redaction assertions are structural rather than a search for known
  * secrets, so this works without ever reading the real config: it asserts that
  * nothing under a sensitive key survived, that `OrcaSlicer.conf` came back
- * reduced to its one allowlisted field, and that no address-shaped string
- * appears anywhere in the payload.
+ * reduced to its allowlisted fields **and that each of those was rebuilt rather
+ * than forwarded**, and that no address-shaped string appears anywhere in the
+ * payload.
  *
  *   node scripts/verify-deploy.mjs http://host:8099
  */
@@ -76,15 +77,39 @@ async function main() {
     ? ok('no value survives under any credential-bearing key')
     : bad(`${leaked} credential value(s) present in the payload`);
 
-  // 5. OrcaSlicer.conf reduced to its allowlisted shape.
+  // 5. OrcaSlicer.conf reduced to its allowlisted shape: three fields, and each
+  //    rebuilt rather than forwarded. The per-entry check on `models` is the one
+  //    that matters most — an entry passed through whole would carry whatever the
+  //    real conf keeps beside the three fields the slicer reads, and the top-level
+  //    key check alone would not notice.
+  const CONF_KEYS = ['app', 'filaments', 'models'];
+  const MODEL_KEYS = ['vendor', 'model', 'nozzle_diameter'];
   const conf = files.find((f) => f.path === 'OrcaSlicer.conf');
   if (conf) {
     const parsed = JSON.parse(conf.text);
     const keys = Object.keys(parsed);
     const appKeys = Object.keys(parsed.app ?? {});
-    keys.length === 1 && keys[0] === 'app' && appKeys.length === 1 && appKeys[0] === 'preset_folder'
-      ? ok('OrcaSlicer.conf reduced to { app: { preset_folder } }')
-      : bad(`OrcaSlicer.conf served extra fields: ${JSON.stringify(keys)} / ${JSON.stringify(appKeys)}`);
+    const extra = keys.filter((k) => !CONF_KEYS.includes(k));
+    extra.length === 0 && appKeys.every((k) => k === 'preset_folder')
+      ? ok(`OrcaSlicer.conf reduced to { ${keys.join(', ')} }`)
+      : bad(`OrcaSlicer.conf served extra fields: ${JSON.stringify(extra)} / ${JSON.stringify(appKeys)}`);
+
+    const names = parsed.filaments ?? [];
+    Array.isArray(names) && names.every((n) => typeof n === 'string')
+      ? ok(`installed filaments served as ${names.length} name(s), nothing else`)
+      : bad(`filaments section is not a list of names: ${JSON.stringify(names).slice(0, 120)}`);
+
+    const models = parsed.models ?? [];
+    const strayModelKeys = [
+      ...new Set(
+        (Array.isArray(models) ? models : []).flatMap((m) =>
+          Object.keys(m ?? {}).filter((k) => !MODEL_KEYS.includes(k)),
+        ),
+      ),
+    ];
+    strayModelKeys.length === 0
+      ? ok(`installed models served as ${models.length} entry(ies), three fields each`)
+      : bad(`models entries carry unallowlisted fields: ${strayModelKeys.join(', ')}`);
   }
 
   // 6. No address-shaped strings anywhere. Catches a key that IS the secret,
