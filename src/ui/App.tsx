@@ -372,7 +372,28 @@ export function App() {
               <Overview index={index} onOpenHealth={() => setTab('health')} timing={timing} />
             ))}
 
-          {tab === 'graph' && <GraphView index={index} onSelect={showPreset} />}
+          {tab === 'graph' && (
+            <GraphView
+              index={index}
+              kinds={view.graphKinds}
+              includeSystemOnly={view.graphSystemOnly}
+              includeInactive={view.graphInactive}
+              // No `push`: a chip is fiddling, and Back should undo "I went to the
+              // graph", not each of six clicks on the way through it.
+              onFilters={(patch) =>
+                updateView({
+                  ...(patch.kinds !== undefined && { graphKinds: patch.kinds }),
+                  ...(patch.includeSystemOnly !== undefined && {
+                    graphSystemOnly: patch.includeSystemOnly,
+                  }),
+                  ...(patch.includeInactive !== undefined && {
+                    graphInactive: patch.includeInactive,
+                  }),
+                })
+              }
+              onSelect={showPreset}
+            />
+          )}
 
           {tab === 'printer' && (
             <PrinterView

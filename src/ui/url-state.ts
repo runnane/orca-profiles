@@ -9,6 +9,13 @@
  * ids are a separate decision (ORCA-16), because a preset id is its path and a
  * link is a thing people paste into chats.
  *
+ * The graph's three filters are here too (ORCA-15) and carry no name either. They
+ * were sequenced behind ORCA-12 for a reason worth remembering: until that landed,
+ * leaving the graph tab and coming back was the *only* escape from an all-off
+ * filter state, because `App` unmounts the view and the state died with it. URL
+ * state survives the unmount, so that accidental escape hatch is gone — and the
+ * on-screen way out ORCA-12 added is what replaces it.
+ *
  * Decisions worth keeping:
  *
  *  - **A query string, not a path.** The app is served two ways — the container's
@@ -62,6 +69,20 @@ export interface ViewState {
   showInactive: boolean;
   /** Health tab: one finding kind, or all of them. */
   healthKind: Finding['kind'] | 'all';
+  /**
+   * Graph tab: which kinds are drawn.
+   *
+   * Separate from the sidebar's `kinds` rather than shared. They look like the same
+   * filter and are not: the sidebar picks what to *list*, the graph picks what to
+   * *draw*, and the two have different useful defaults — narrowing a diagram to one
+   * kind is normal, narrowing the sidebar to one kind while you are reading the
+   * graph is not. Sharing one key would make each tab silently change the other.
+   */
+  graphKinds: Set<PresetKind>;
+  /** Graph tab: include vendor presets nothing of yours inherits from. */
+  graphSystemOnly: boolean;
+  /** Graph tab: include user folders the slicer does not load. */
+  graphInactive: boolean;
 }
 
 export function defaultViewState(): ViewState {
@@ -72,6 +93,9 @@ export function defaultViewState(): ViewState {
     origins: new Set<PresetOrigin>(['user']),
     showInactive: false,
     healthKind: 'all',
+    graphKinds: new Set(KINDS),
+    graphSystemOnly: false,
+    graphInactive: false,
   };
 }
 
@@ -95,6 +119,9 @@ export function parseViewState(search: string): ViewState {
     origins: parseSet(p.get('origins'), ORIGINS, d.origins),
     showInactive: p.get('inactive') === '1',
     healthKind: health !== null && isFindingKind(health) ? health : d.healthKind,
+    graphKinds: parseSet(p.get('gkinds'), KINDS, d.graphKinds),
+    graphSystemOnly: p.get('gvendor') === '1',
+    graphInactive: p.get('ginactive') === '1',
   };
 }
 
@@ -108,6 +135,13 @@ export function serialiseViewState(view: ViewState): string {
   if (!sameSet(view.origins, d.origins)) p.set('origins', order(view.origins, ORIGINS).join(','));
   if (view.showInactive) p.set('inactive', '1');
   if (view.healthKind !== d.healthKind) p.set('health', view.healthKind);
+  // `g`-prefixed, because the graph's kind filter is a different filter from the
+  // sidebar's and a shared key would make one tab move the other.
+  if (!sameSet(view.graphKinds, d.graphKinds)) {
+    p.set('gkinds', order(view.graphKinds, KINDS).join(','));
+  }
+  if (view.graphSystemOnly) p.set('gvendor', '1');
+  if (view.graphInactive) p.set('ginactive', '1');
   const s = p.toString();
   return s ? `?${s}` : '';
 }
