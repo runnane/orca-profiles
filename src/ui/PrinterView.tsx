@@ -111,6 +111,24 @@ function explain(c: Compatibility, machine: Preset): string {
 }
 
 function explainCompatibility(c: Compatibility, machine: Preset): string {
+  return `${compatibilitySentence(c, machine)}${inherited(c.evidence.from, c.evidence.key)}`;
+}
+
+/**
+ * Where the deciding key actually lives, when it is not in this preset's file.
+ *
+ * A user preset saved from a vendor one stores its overrides and nothing else, so
+ * the gate that decided its verdict is usually in a file the user has never
+ * opened. Saying "its `compatible_printers` names other printers" without saying
+ * *whose* is how someone goes looking for a key that is not there.
+ */
+function inherited(from: string | undefined, key: string): string {
+  return from
+    ? ` It does not state \`${key}\` itself — that comes from “${from}”, which it inherits, and which is the file to change.`
+    : '';
+}
+
+function compatibilitySentence(c: Compatibility, machine: Preset): string {
   if (c.reason === 'condition') {
     if (c.included === 'undetermined') {
       return 'It has no `compatible_printers` list, so a condition decides — and this one is outside the subset this app evaluates. The expression is below, verbatim.';
@@ -391,7 +409,8 @@ function Row({
         <span className="compat-gate">
           {gate.names.length > 0 ? (
             <>
-              Second gate — <code>compatible_prints</code> accepts{' '}
+              Second gate — <code>compatible_prints</code>
+              {gate.from && <> (inherited from “{gate.from}”)</>} accepts{' '}
               {gate.names.map((n) => `“${n}”`).join(', ')}
               {gate.passes === undefined
                 ? '. Choose a process above to include it.'
@@ -401,7 +420,8 @@ function Row({
             </>
           ) : (
             <>
-              Second gate — <code>compatible_prints_condition</code> decides against the process:{' '}
+              Second gate — <code>compatible_prints_condition</code>
+              {gate.from && <> (inherited from “{gate.from}”)</>} decides against the process:{' '}
               <span className="mono">{gate.condition}</span>
               {gate.passes === 'undetermined' && ' (outside the subset this app evaluates)'}
             </>

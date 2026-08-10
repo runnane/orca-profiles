@@ -174,12 +174,18 @@ if (machines.length > 0) {
     ];
     for (const x of ranked.slice(0, 8)) {
       const verdict = offering(x);
-      const why =
+      const base =
         verdict === 'not-installed'
           ? (NOT_INSTALLED[x.visibility.reason] ?? 'not installed')
           : x.reason === 'condition' && x.included === 'undetermined'
             ? 'depends on a condition outside the subset we evaluate'
             : REASON[x.reason];
+      // Which file states the deciding key, when this preset does not. Usually a
+      // vendor preset the user has never opened.
+      const why =
+        verdict !== 'not-installed' && x.evidence.from
+          ? `${base} (inherited from ${x.evidence.from})`
+          : base;
       console.log(`    ${verdictWord(verdict).padEnd(13)} ${x.preset.name} — ${why}`);
       // The expression verbatim, for the two cases where it is the answer.
       if (x.reason === 'condition' && verdict !== 'not-installed') {

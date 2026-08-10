@@ -1275,6 +1275,106 @@ describe('printer compatibility', () => {
   });
 });
 
+describe('gates are inherited, because the slicer reads the resolved config', () => {
+  // `preset.config = inherit_preset->config` followed by the file's own keys on
+  // top (Preset.cpp:1679-1684), and every compatibility read goes through that
+  // config (Preset.cpp:778, :800, :825; Preset.hpp:339, :347). A preset file is
+  // therefore not what the slicer judges, and reading one as if it were reported
+  // 47 filaments available where OrcaSlicer offered 18.
+  const machine = byFile('user/default/machine/Workshop Cube.json');
+  const c = compatibilityFor(index, machine);
+  const of = (name: string) => {
+    const v = [...c.filaments, ...c.processes].find((x) => x.preset.name === name);
+    if (!v) throw new Error(`not judged: ${name}`);
+    return v;
+  };
+
+  it('excludes a filament whose only compatible_printers is its parent’s', () => {
+    // The bug, in one assertion. The file mentions no printers; the preset is
+    // pinned to `Acme Cube 0.6 nozzle`, which this printer neither is nor
+    // inherits. Read from the file it is "compatible with everything" and
+    // available — the exact wrong answer, for most of a real config.
+    expect(of('Studio ABS From Cube6')).toMatchObject({
+      included: false,
+      reason: 'excluded',
+      evidence: {
+        key: 'compatible_printers',
+        value: 'Acme Cube 0.6 nozzle',
+        // The point of walking the chain instead of flattening it: the verdict
+        // names the file you would have to open.
+        from: 'Acme ABS @Cube6',
+      },
+    });
+    expect(offering(of('Studio ABS From Cube6'))).toBe('excluded');
+  });
+
+  it('offers that same filament for the printer its parent’s list names', () => {
+    const cube6 = compatibilityFor(index, byFile('system/Acme/machine/Acme Cube 0.6 nozzle.json'));
+    expect(cube6.filaments.find((x) => x.preset.name === 'Studio ABS From Cube6')).toMatchObject({
+      included: true,
+      reason: 'named-explicitly',
+    });
+  });
+
+  it('lets a child clear an inherited list by stating an empty one', () => {
+    // The failing direction for "stated counts, empty or not". The loader applies
+    // the child's keys over the parent's config and an empty vector is a value, so
+    // this preset is genuinely unpinned. Testing for a non-empty value instead
+    // would fall through to the parent and invert it.
+    expect(of('Studio ABS Unpinned')).toMatchObject({
+      included: true,
+      reason: 'compatible-with-everything',
+    });
+    expect(of('Studio ABS Unpinned').evidence.from).toBeUndefined();
+  });
+
+  it('judges a child by a condition only its parent states', () => {
+    // `compatible_printers_condition()` is a config accessor, so this child is
+    // decided by an expression that appears nowhere in its file — and this one is
+    // false for the Acme Cube, so the verdict flips.
+    expect(of('Studio PLA From Globex')).toMatchObject({
+      included: false,
+      reason: 'condition',
+      evidence: {
+        key: 'compatible_printers_condition',
+        value: 'printer_notes=~/.*GLOBEX.*/',
+        from: 'Acme PLA @Globex',
+      },
+    });
+  });
+
+  it('reads an inherited compatible_prints as the second gate', () => {
+    expect(of('Studio PLA From Fine').processGate).toMatchObject({
+      names: ['0.20mm Standard @Acme'],
+      from: 'Acme PLA @Fine',
+    });
+    // And it still ANDs against a chosen process rather than being a note only.
+    const scoped = compatibilityFor(index, machine, {
+      process: byFile('user/default/process/Fast Draft.json'),
+    });
+    expect(scoped.filaments.find((x) => x.preset.name === 'Studio PLA From Fine')).toMatchObject({
+      included: false,
+      processGate: { passes: false },
+    });
+  });
+
+  it('finds a user printer’s defaults on the vendor preset it was saved from', () => {
+    // `Workshop Cube` states neither `default_*` key; both come from
+    // `Acme Cube 0.4 nozzle`, and `PresetBundle` reads them off the printer's
+    // config (PresetBundle.cpp:2142-2166).
+    expect(machine.raw.default_filament_profile).toBeUndefined();
+    expect(of('Acme PLA @System').isPrinterDefault).toBe(true);
+    expect(of('0.20mm Standard @Acme').isPrinterDefault).toBe(true);
+  });
+
+  it('does not attribute a preset’s own gate to an ancestor', () => {
+    // `from` is the difference between "your file says this" and "a vendor file
+    // says this", and getting it wrong sends someone to edit the wrong preset.
+    expect(of('Studio ABS').evidence.from).toBeUndefined();
+    expect(of('Studio PLA Conditional').evidence.from).toBeUndefined();
+  });
+});
+
 describe('the installed gate', () => {
   const machine = byFile('user/default/machine/Workshop Cube.json');
   const c = compatibilityFor(index, machine);
