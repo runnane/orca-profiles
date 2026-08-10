@@ -87,6 +87,11 @@ test('loads a config and walks every tab without console errors', async ({ page 
   await page.screenshot({ path: `${SHOTS}/8-printer-undetermined.png` });
   await expect(page.locator('.compat-expr').first()).toBeVisible();
   await page.getByRole('button', { name: 'all', exact: true }).click();
+  // A gate that arrived through `inherits` has to name the file that states it —
+  // most user presets store no `compatible_printers` and are pinned by one anyway.
+  await expect(
+    page.getByText(/that comes from “Acme ABS @Cube6”, which it inherits/).first(),
+  ).toBeVisible();
   // The sentence that stops a bug report being filed: available *because the
   // printer inherits from* a preset the filament names.
   await expect(page.getByText(/which Workshop Cube inherits from/).first()).toBeVisible();

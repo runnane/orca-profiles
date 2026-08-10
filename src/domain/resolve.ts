@@ -51,6 +51,54 @@ export function isSettingKey(key: string): boolean {
   return !META_KEYS.has(key);
 }
 
+/** One key's value, and which preset in the chain actually stated it. */
+export interface ChainValue {
+  value: RawValue;
+  /** The preset that states the key: the preset itself, or an ancestor. */
+  source: Preset;
+  /** True when an ancestor supplied it — the file you would open to change it. */
+  inherited: boolean;
+}
+
+/**
+ * A reader for a single preset's *effective* keys, without resolving all of them.
+ *
+ * This exists because a preset file is not what the slicer reads. The loader
+ * starts from the parent's config and applies the file's own keys on top —
+ * `preset.config = inherit_preset->config;` then
+ * `update_diff_values_to_child_config(config, …)` (v2.4.2 Preset.cpp:1679-1684) —
+ * so a key absent from the file is not absent from the preset. Anything that asks
+ * "does this preset have `compatible_printers`" and looks at the file gets the
+ * wrong answer for every user preset that was saved from a vendor one, which is
+ * most of them.
+ *
+ * `resolve()` answers the same question and builds a ~350-key map with full
+ * shadowing provenance to do it. That is right for a settings table and far too
+ * much for five keys across a few thousand presets on every printer selection, so
+ * this walks the chain once and reads keys off it.
+ *
+ * **"States the key" means the key is present, not that it is non-empty.** A
+ * child holding `compatible_printers: []` over a parent that names printers is
+ * compatible with everything: the child's key is applied, and an empty vector is
+ * a value. Testing for truthiness here would silently fall through to the parent
+ * and invert that.
+ */
+export function chainLookup(
+  index: ConfigIndex,
+  preset: Preset,
+): (key: string) => ChainValue | undefined {
+  const { chain } = inheritanceChain(index, preset);
+  return (key: string) => {
+    for (const p of chain) {
+      if (!Object.hasOwn(p.raw, key)) continue;
+      const value = p.raw[key];
+      if (value === undefined) continue;
+      return { value, source: p, inherited: p.id !== preset.id };
+    }
+    return undefined;
+  };
+}
+
 /** Resolve every effective setting, with provenance. */
 export function resolve(index: ConfigIndex, preset: Preset): Resolution {
   const { chain, missingParent, circular } = inheritanceChain(index, preset);

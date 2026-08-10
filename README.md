@@ -187,9 +187,40 @@ stay wide.
 
 ### Gate 2: compatible
 
-The rule is
+**Every key below is read off the resolved inheritance chain, not off the file.**
+This is the one worth internalising, because it makes the file misleading rather
+than merely incomplete. The loader starts from the parent's config and lays the
+file's own keys over it —
+
+```cpp
+preset.config = inherit_preset->config;
+preset.config.update_diff_values_to_child_config(config, …);
+```
+
+([Preset.cpp:1679](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1679))
+— and every compatibility read goes through `preset.config`
+([Preset.cpp:825](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L825),
+[:800](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L800),
+[:778](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L778)),
+including the conditions, which are config accessors
+([Preset.hpp:347](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.hpp#L347)).
+
+"Save as" from a vendor filament writes your overrides and nothing else, so the
+new file mentions no printers while the preset stays pinned to the ones the vendor
+tuned it for. Read the file and every such preset looks compatible with
+everything — which is how this app came to offer 47 filaments where the slicer
+offered 18, *after* the installed gate had already removed a thousand. So a
+verdict here also names the preset that states the deciding key, when it is not
+the one you are looking at.
+
+One consequence that inverts if you get it backwards: **a stated-but-empty value
+overrides an inherited one.** `compatible_printers: []` in a child really does
+mean compatible with everything, because the child's key is applied and an empty
+vector is a value. Present counts as stated; non-empty is a different test.
+
+The rule itself is
 [`Preset::is_compatible_with_printer`](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L809),
-and it is checked in this order:
+checked in this order:
 
 | | Mechanism |
 |---|---|
