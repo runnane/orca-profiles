@@ -114,6 +114,37 @@ collection at all
 ([PresetBundle.cpp:4929](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4929)),
 so two vendors shipping one is not a clash and is not reported as one.
 
+**The mirror image of that rule is `inherits`, and it is stricter.** A vendor's
+`inherits` is resolved against its own bundle's config maps, then against
+`OrcaFilamentLibrary`'s, and nowhere else
+([PresetBundle.cpp:4889](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4889)):
+
+> Separate ORCA_FILAMENT_LIBRARY from other vendors. It must be loaded first
+> because other vendors' filaments may inherit from it via the `base_bundle`
+> lookup in parse_subfile. **The remaining vendors are independent (no
+> cross-vendor inheritance)** and can be loaded in parallel.
+> — [PresetBundle.cpp:2216](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L2216)
+
+So a vendor preset naming another vendor's base is not a preset with an unusual
+parent. `parse_subfile` returns `"Can not find inherits"`
+([PresetBundle.cpp:4913](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4913))
+and the caller raises a `ConfigurationError` for that vendor's **entire bundle**
+([PresetBundle.cpp:5121](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L5121)) —
+every preset the vendor ships is then absent from the slicer.
+
+Two limits on the shared bundle, both from where its hand-over sits in the loader:
+it carries **filament** bases only, because `m_config_maps` is assigned straight
+after the filament loop and the maps are cleared per preset type
+([PresetBundle.cpp:5147](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L5147)),
+so a machine base has to be per-vendor; and the library itself is loaded with no
+base bundle, so its own presets can only inherit within it.
+
+None of this applies to **your** presets, or to any key other than `inherits`.
+A user preset inherits inside its own collection, which holds every vendor's
+presets after the merge, and `compatible_printers` and the `default_*` keys are
+matched against those merged collections much later — a vendor filament naming
+another vendor's printer there is ordinary.
+
 ### 4. The same value is written two different ways
 
 A preset saved by the slicer stores vector options as JSON arrays; one
