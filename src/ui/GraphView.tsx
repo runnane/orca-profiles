@@ -51,6 +51,8 @@ const BADGE_HELP: Record<string, string> = {
     'No parent, so it stores every setting itself. Vendor updates never reach it, and there is no way to see which values you deliberately changed — this is the usual reason a preset is hundreds of keys long.',
   'custom root':
     'Saved detached into the kind’s base/ folder, which OrcaSlicer loads first so that other presets can inherit it by name (Preset.cpp:1583). It always carries “detached copy” as well: being detached is the point of it, not a second fault.',
+  'vendor base':
+    'Marked instantiation: "false", so OrcaSlicer never adds it to a collection (PresetBundle.cpp:4929) — it cannot be selected and appears in no list. It is drawn here because it is a real root carrying real settings, and hiding it would break every chain below it, but it is not a preset you can pick.',
   'never loaded':
     'Another file claimed this name first, so OrcaSlicer skips this one entirely (Preset.cpp:1619). Editing it changes nothing, and everything else this row says about it is moot.',
   'parent missing':
@@ -319,6 +321,9 @@ function Row({
   if (node.shadowed) badges.push({ label: 'never loaded', tone: 'danger' });
   if (edge && !edge.resolved) badges.push({ label: 'parent missing', tone: 'danger' });
   if (edge?.back) badges.push({ label: 'loop', tone: 'warn' });
+  // Drawn, not hidden: a base is a real root carrying real settings and every chain
+  // below it depends on it. Labelled so it is not read as something selectable.
+  if (!node.instantiable) badges.push({ label: 'vendor base', tone: 'plain' });
   if (node.isCustomRoot) badges.push({ label: 'custom root', tone: 'plain' });
   if (detached) badges.push({ label: 'detached copy', tone: 'warn' });
 

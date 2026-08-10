@@ -560,8 +560,15 @@ export function findNearDuplicates(index: ConfigIndex, presets: Preset[]): Findi
 }
 
 export interface ConfigStats {
+  /** Selectable vendor presets. Excludes `instantiation: "false"` bases. */
   system: number;
   user: number;
+  /**
+   * Vendor bases — `instantiation: "false"` — which are inheritance sources and not
+   * presets. Reported rather than merely subtracted: a number that dropped with no
+   * explanation reads as presets having gone missing.
+   */
+  bases: number;
   /** Cloud sync snapshots under `_local/`, indexed but excluded everywhere else. */
   snapshots: number;
   vendors: number;
@@ -571,18 +578,27 @@ export interface ConfigStats {
 
 export function stats(index: ConfigIndex): ConfigStats {
   const byKind: Record<string, { system: number; user: number }> = {};
-  for (const p of index.active) {
+  // Counted over selectable presets only. A vendor base is not a preset you could
+  // pick — it is never added to a collection at all (PresetBundle.cpp:4929-4941) —
+  // and on a config with several vendors installed the `fdm_*` set is a large
+  // fraction of the "System presets" figure and the `Presets N` badge.
+  const selectable = index.active.filter((p) => p.instantiable);
+  for (const p of selectable) {
     byKind[p.kind] ??= { system: 0, user: 0 };
     byKind[p.kind][p.origin]++;
   }
+  // The deepest chain is measured over **everything**, bases included: a base is a
+  // real root carrying real settings, and the chains it roots are exactly what that
+  // number is about. Dropping it here would understate every depth by one.
   let deepest: { name: string; depth: number } | null = null;
   for (const p of index.active) {
     const d = resolve(index, p).chain.length;
     if (!deepest || d > deepest.depth) deepest = { name: p.name, depth: d };
   }
   return {
-    system: index.active.filter((p) => p.origin === 'system').length,
-    user: index.active.filter((p) => p.origin === 'user').length,
+    system: selectable.filter((p) => p.origin === 'system').length,
+    user: selectable.filter((p) => p.origin === 'user').length,
+    bases: index.active.length - selectable.length,
     snapshots: index.presets.length - index.active.length,
     vendors: index.vendors.length,
     byKind,

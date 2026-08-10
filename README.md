@@ -114,6 +114,19 @@ collection at all
 ([PresetBundle.cpp:4929](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4929)),
 so two vendors shipping one is not a clash and is not reported as one.
 
+That same line means **a base is not a preset**: it cannot be selected and it
+appears in no list the slicer shows. So it is excluded from every count and list
+here that means "presets you could use" — the overview figures, the `Presets N`
+badge, the printer view's filament and process lists — and reported as its own
+`Vendor bases` figure rather than silently subtracted, because a number that drops
+with no explanation reads as presets having gone missing.
+
+It is still **drawn in the graph and listed in the sidebar**, labelled `vendor
+base`. A base is a real root carrying real settings, every chain below it depends
+on it, and "where did this value come from" is the question the app exists to
+answer — hiding it would break the diagram to make a count tidy. The `Template`
+vendor is the documented exception in the same guard, and its bases *are* loaded.
+
 ### 4. The same value is written two different ways
 
 A preset saved by the slicer stores vector options as JSON arrays; one

@@ -97,7 +97,7 @@
  */
 
 import { evaluateCondition, printerInjectedVars, type ConditionContext } from './condition';
-import { shadowedIds, type ConfigIndex } from './index-config';
+import { isInstantiable, shadowedIds, type ConfigIndex } from './index-config';
 import { hasVariant } from './installed';
 import { referenceNames } from './references';
 import { chainLookup, resolve, type ChainValue } from './resolve';
@@ -222,19 +222,14 @@ export interface PrinterCompatibility {
  * Is this preset one the slicer would actually offer, or only an inheritance
  * source?
  *
- * A vendor-bundle preset marked `instantiation: "false"` is **never added to the
- * collection at all**: it is stored as a config map for others to inherit and the
- * loader returns before the preset is constructed (PresetBundle.cpp:4929-4941).
- * So `fdm_filament_common` cannot be selected for any printer, and listing it as
- * "available" would be describing something that is not there.
- *
- * The `Template` vendor is the documented exception — the guard is
- * `instantiation == "false" && "Template" != vendor_name` — so its
- * non-instantiable presets *are* loaded and stay in the list.
+ * This used to be its own copy of the `instantiation: "false"` rule, written here
+ * because the printer view was the place the bug was visible — it listed three
+ * vendor bases as "available" filaments. The rule now lives on `Preset` and is set
+ * once in `buildIndex`, so the printer view and the counts cannot disagree about it
+ * and the `Template` exception exists in one place. Kept as a local alias because
+ * "would the slicer offer this" is the question this file asks.
  */
-function isSelectable(p: Preset): boolean {
-  return p.raw.instantiation !== 'false' || p.vendor === 'Template';
-}
+const isSelectable = isInstantiable;
 
 export interface CompatibilityOptions {
   /**
