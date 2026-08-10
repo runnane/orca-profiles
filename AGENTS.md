@@ -46,11 +46,15 @@ Node ≥ 22, pnpm pinned by `packageManager`.
 - **Credentials are stripped server-side, by key name.** Machine presets carry
   `printhost_apikey`, `printhost_password`, `print_host`; `OrcaSlicer.conf`
   carries `access_code`, `user_access_code`, `dev_sn` and a `local_machines` map
-  **keyed by printer IP**. That conf gets an **allowlist** (one field), never a
-  denylist — a key that is itself the secret cannot be scrubbed by blanking
-  values. Deciding by key name rather than by recognising a value is what keeps
-  a credential we have never seen covered. See
-  [`src/domain/redact.ts`](src/domain/redact.ts).
+  **keyed by printer IP**. That conf gets an **allowlist** — three fields
+  (`app.preset_folder`, `filaments`, `models`) — never a denylist, because a key
+  that is itself the secret cannot be scrubbed by blanking values. Each field is
+  **rebuilt from parsed values, never forwarded**, so a key sitting beside one of
+  them inside its own object cannot ride along; and a section we could not read is
+  **omitted rather than emitted empty**, because an empty `filaments` is the claim
+  "nothing is installed" and the reader acts on it by hiding presets. Deciding by
+  key name rather than by recognising a value is what keeps a credential we have
+  never seen covered. See [`src/domain/redact.ts`](src/domain/redact.ts).
 - **Test in the failing direction.** A check that cannot go red is not a check.
   The redaction tests use inputs that actually contain secrets, because the
   fixture's are blank and a test against it passed while the code leaked.
@@ -68,7 +72,10 @@ Node ≥ 22, pnpm pinned by `packageManager`.
   in the browser, in the container and in the terminal report. Readers live in
   `src/source/` (browser), `src/server/` (container) and
   `src/domain/load-fixtures.ts` (node/tests) — keep the three in agreement about
-  what a config contains, including `OrcaSlicer.conf`.
+  what a config contains, including `OrcaSlicer.conf`. `scripts/build-sample.mjs`
+  is a fourth producer of that payload and has to agree too: it bundles the
+  fixture for the "load sample" path, conf included, through the *same*
+  `redactConfJson` rather than a copy of it.
 - **Branch → commit → PR, always from fresh `main`.** One issue → one PR → one
   merge. `--base main` explicitly. See
   [`shared/pr-hygiene.md`](.claude/commands/shared/pr-hygiene.md).

@@ -127,16 +127,93 @@ export function redactPresetJson(text: string): string {
  * cannot be caught by scrubbing values, and the shape can change between
  * releases — so guessing at what is dangerous is the wrong way round.
  *
- * The app needs exactly one field from this file: which user profile is live.
- * Everything else is dropped.
+ * The app needs three things out of this file, and takes only those three:
+ *
+ *  - `app.preset_folder` — which user profile is live.
+ *  - `filaments` — the installed filament presets, which is half of the
+ *    `is_visible` gate (see [`installed.ts`](installed.ts)). Preset names, all of
+ *    which the served preset files already carry.
+ *  - `models` — the installed printer model/variant list, the other half. Vendor
+ *    ids, model ids and nozzle diameters, likewise already public product data
+ *    present in `system/`.
+ *
+ * Each is **rebuilt from parsed values rather than passed through**, field by
+ * field and type by type, so a key that happens to sit next to one of them —
+ * `access_code` beside `models`, a future `local_machines`-shaped addition inside
+ * a `models` entry — cannot ride along. That is what keeps this an allowlist
+ * rather than three holes in one.
+ *
+ * `filaments` is emitted in its array form whichever form it arrived in, because
+ * that is what the slicer itself writes (AppConfig.cpp:966-973) and one shape
+ * across both transports is one shape to reason about.
+ *
+ * **A section we could not read is omitted, never emitted empty.** An empty
+ * `filaments` is a claim — "nothing is installed" — and the reader acts on it by
+ * gating a filament list down to almost nothing. Manufacturing that claim out of
+ * a conf we failed to parse would empty the app's lists over a transport
+ * accident, so absence is passed on as absence and the reader applies no gate.
+ * An `filaments: []` that was genuinely in the file *is* forwarded: that one is
+ * the config's claim, not ours.
  */
 export function redactConfJson(text: string): string {
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
     const app = (parsed?.app ?? {}) as Record<string, unknown>;
     const presetFolder = typeof app.preset_folder === 'string' ? app.preset_folder : '';
-    return JSON.stringify({ app: { preset_folder: presetFolder } });
+    const filaments = installedFilamentNames(parsed?.filaments);
+    const models = installedModels(parsed?.models);
+    return JSON.stringify({
+      app: { preset_folder: presetFolder },
+      ...(filaments ? { filaments } : {}),
+      ...(models ? { models } : {}),
+    });
   } catch {
     return JSON.stringify({ app: { preset_folder: '' } });
   }
+}
+
+/**
+ * The `filaments` section as a list of names, from either serialisation.
+ *
+ * Mirrors `readFilaments` in `installed.ts`, including "a map entry with an empty
+ * value is not installed" (Preset.cpp:869-872) — dropping such a name here rather
+ * than forwarding it keeps the transport from carrying a state the reader would
+ * have to re-decide.
+ */
+function installedFilamentNames(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    return value.filter((v): v is string => typeof v === 'string' && v !== '');
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .filter(([name, v]) => name !== '' && typeof v === 'string' && v !== '')
+      .map(([name]) => name);
+  }
+  return undefined;
+}
+
+/**
+ * The `models` section, rebuilt to exactly the three fields `AppConfig::load`
+ * reads (AppConfig.cpp:735-746). An entry missing either identifier is dropped:
+ * it cannot gate anything, so forwarding it would only carry whatever else is in
+ * it.
+ */
+function installedModels(
+  value: unknown,
+): { vendor: string; model: string; nozzle_diameter: string }[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: { vendor: string; model: string; nozzle_diameter: string }[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.vendor !== 'string' || typeof e.model !== 'string') continue;
+    if (e.vendor === '' || e.model === '') continue;
+    const nd = e.nozzle_diameter;
+    out.push({
+      vendor: e.vendor,
+      model: e.model,
+      nozzle_diameter: typeof nd === 'string' ? nd : Array.isArray(nd) ? nd.map(String).join(';') : '',
+    });
+  }
+  return out;
 }

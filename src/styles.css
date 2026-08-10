@@ -416,6 +416,10 @@ td.src { width: 26%; font-size: 11px; color: var(--ink-muted); }
 .compat-row.available { border-left-color: var(--ok); }
 .compat-row.excluded { border-left-color: var(--danger); }
 .compat-row.undetermined { border-left-color: var(--warn); }
+/* "not installed" gets no status colour on purpose: the palette is reserved for
+   ok/warn/danger and this is none of them — the preset is simply absent, which is
+   neither a fault nor a warning. The word carries it, as it does everywhere. */
+.compat-row.not-installed { border-left-color: var(--border-strong); }
 .compat-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .compat-head .cname { font-weight: 600; }
 .compat-why { color: var(--ink-muted); }
@@ -447,6 +451,8 @@ td.src { width: 26%; font-size: 11px; color: var(--ink-muted); }
 .verdict.excluded .dot { background: var(--danger); }
 .verdict.undetermined { color: var(--warn); }
 .verdict.undetermined .dot { background: var(--warn); }
+.verdict.not-installed { color: var(--ink-faint); }
+.verdict.not-installed .dot { background: var(--ink-faint); }
 
 /* graph: what the row badges mean. Real text on the page rather than a tooltip
    only — a `title` is unreachable on touch and by keyboard. */

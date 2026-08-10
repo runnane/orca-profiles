@@ -11,7 +11,13 @@
 
 import { describe, expect, it } from 'vitest';
 import { analyze, stats } from './analyze';
-import { compatibilityFor, compatibilitySummary } from './compatibility';
+import {
+  compatibilityFor,
+  compatibilitySummary,
+  machineVisibility,
+  offering,
+  visibilityIndex,
+} from './compatibility';
 import { evaluateCondition, printerInjectedVars } from './condition';
 import { diffEffective, diffRaw } from './diff';
 import { buildGraph } from './graph';
@@ -23,6 +29,7 @@ import {
   shadowedIds,
   type ConfigIndex,
 } from './index-config';
+import { readInstalled } from './installed';
 import { loadConfigDir } from './load-fixtures';
 import { parseQuotedList, scalarAsList, valuesEqual } from './normalize';
 import { presetReferences, referenceNames } from './references';
@@ -1074,10 +1081,282 @@ describe('printer compatibility', () => {
 
   it('summarises without re-deriving anything', () => {
     const s = compatibilitySummary(c.filaments);
-    expect(s.yes + s.no + s.undetermined).toBe(c.filaments.length);
+    expect(s.yes + s.no + s.undetermined + s.notInstalled).toBe(c.filaments.length);
     // One of the two conditional filaments is now decided; the `interpolate_table`
-    // one is not, and must not be rounded to a boolean.
+    // one is not, and must not be rounded to a boolean. Both are user presets, so
+    // the installed gate never reaches them.
     expect(s.undetermined).toBe(1);
+    // Every count comes from `offering`, so a header cannot disagree with its list.
+    for (const [key, want] of [
+      ['yes', 'available'],
+      ['no', 'excluded'],
+      ['undetermined', 'undetermined'],
+      ['notInstalled', 'not-installed'],
+    ] as const) {
+      expect(s[key]).toBe(c.filaments.filter((x) => offering(x) === want).length);
+    }
+  });
+});
+
+describe('the installed gate', () => {
+  const machine = byFile('user/default/machine/Workshop Cube.json');
+  const c = compatibilityFor(index, machine);
+  const of = (name: string) => {
+    const v = [...c.filaments, ...c.processes].find((x) => x.preset.name === name);
+    if (!v) throw new Error(`not judged: ${name}`);
+    return v;
+  };
+
+  it('is a second gate, not a re-reading of the first', () => {
+    // The bug this whole thing exists for. `Shared PLA @System` names no printers,
+    // so it is compatible with every one of them — and it is not in the conf's
+    // `filaments`, so OrcaSlicer does not offer it. Both statements are true at
+    // once, and collapsing them into one boolean is what listed 320 filaments
+    // where the slicer listed 18.
+    expect(of('Shared PLA @System')).toMatchObject({
+      included: true,
+      reason: 'compatible-with-everything',
+      visibility: { visible: false, reason: 'not-installed' },
+    });
+    expect(offering(of('Shared PLA @System'))).toBe('not-installed');
+  });
+
+  it('offers a vendor filament the conf lists', () => {
+    expect(of('Acme PLA @System').visibility).toMatchObject({
+      visible: true,
+      reason: 'installed',
+      evidence: { key: 'filaments', value: 'Acme PLA @System' },
+    });
+    expect(offering(of('Acme PLA @System'))).toBe('available');
+  });
+
+  it('never gates a user preset, however absent from the conf it is', () => {
+    // `if (vendor == nullptr) { return; }` (Preset.cpp:858). No user filament is
+    // in the fixture's `filaments` list, and every one of them is still offered —
+    // if this ever goes red the app shows a user their own presets as missing.
+    const users = c.filaments.filter((x) => x.preset.origin === 'user');
+    expect(users.length).toBeGreaterThan(5);
+    expect(index.installed.filaments.has('Studio ABS')).toBe(false);
+    for (const u of users) {
+      expect(u.visibility).toMatchObject({ visible: true, reason: 'not-gated' });
+    }
+  });
+
+  it('never gates a process, because the slicer does not', () => {
+    // `set_visible_from_appconfig` handles TYPE_PRINTER, TYPE_FILAMENT and
+    // TYPE_SLA_MATERIAL. A process is none of them, so a process list is decided
+    // by compatibility alone — including the vendor ones.
+    const system = c.processes.filter((x) => x.preset.origin === 'system');
+    expect(system.length).toBeGreaterThan(0);
+    for (const p of c.processes) {
+      expect(p.visibility.reason).toBe('not-gated');
+    }
+  });
+
+  it('counts a rename the conf has not caught up with as installed', () => {
+    expect(of('Globex PETG @System').visibility).toMatchObject({
+      visible: true,
+      reason: 'installed-under-old-name',
+      evidence: { key: 'renamed_from', value: 'Globex PETG Legacy' },
+    });
+  });
+
+  it('derives the old name the loader derives, `@` deleted and space kept', () => {
+    // "Acme PETG @Cube" -> "Acme PETG Cube": `alias_name` is not right-trimmed
+    // until after the concatenation, so the space before the `@` survives
+    // (PresetBundle.cpp:5089-5093). Off by that space and this preset reads as
+    // uninstalled.
+    expect(of('Acme PETG @Cube').visibility).toMatchObject({
+      visible: true,
+      reason: 'installed-under-old-name',
+      evidence: { key: 'renamed_from', value: 'Acme PETG Cube' },
+    });
+  });
+
+  it('does not derive an old name for a preset that states its own alias', () => {
+    // The failing direction for the rule above: the conf lists "Acme PLA-CF Cube",
+    // and `Acme PLA-CF @Cube` declares `alias`, so the C++ never builds that name
+    // (`if (alias_name.empty())`, PresetBundle.cpp:5086). Deriving it regardless
+    // would show a filament OrcaSlicer does not.
+    expect(index.installed.filaments.has('Acme PLA-CF Cube')).toBe(true);
+    expect(of('Acme PLA-CF @Cube').visibility).toMatchObject({
+      visible: false,
+      reason: 'not-installed',
+    });
+  });
+
+  it('gates a vendor printer on its model and variant', () => {
+    // Same vendor, same model, the other nozzle: the conf installs `0.4` only.
+    expect(machineVisibility(index, byFile('system/Acme/machine/Acme Cube 0.4 nozzle.json'))).toMatchObject({
+      visible: true,
+      reason: 'variant-installed',
+      evidence: { key: 'models', value: 'Acme · Acme Cube · 0.4' },
+    });
+    expect(machineVisibility(index, byFile('system/Acme/machine/Acme Cube 0.6 nozzle.json'))).toMatchObject({
+      visible: false,
+      reason: 'variant-not-installed',
+    });
+  });
+
+  it('never gates a user printer', () => {
+    expect(machineVisibility(index, machine)).toMatchObject({ reason: 'not-gated', visible: true });
+  });
+
+  it('leaves a vendor printer with nothing to gate on visible', () => {
+    // `if (model.empty() || variant.empty()) return;` (Preset.cpp:861-863) leaves
+    // `is_visible` at its load-time value, which for anything instantiable is
+    // true. Reading the early return as "not installed" would hide every printer
+    // preset that inherits its model rather than stating one.
+    const built = buildIndex([
+      { path: 'OrcaSlicer.conf', text: JSON.stringify({ models: [] }) },
+      {
+        path: 'system/Acme/machine/m.json',
+        text: JSON.stringify({ name: 'No Model', instantiation: 'true' }),
+      },
+    ]);
+    expect(machineVisibility(built, built.presets[0])).toMatchObject({
+      visible: true,
+      reason: 'no-variant-declared',
+    });
+  });
+
+  it('applies no gate at all when there is no conf to read', () => {
+    // Absent is not empty. Without the file we know nothing about what is
+    // installed, and gating on that would empty the list on our own ignorance —
+    // the same instinct as "a condition we cannot evaluate means compatible".
+    const built = buildIndex([
+      {
+        path: 'system/Acme/filament/f.json',
+        text: JSON.stringify({ name: 'Acme PLA @System' }),
+      },
+    ]);
+    expect(built.installed.present).toBe(false);
+    const v = visibilityIndex(built);
+    expect([...v.values()][0]).toMatchObject({ visible: true, reason: 'config-unreadable' });
+  });
+
+  it('reads the map serialisation too, and an empty value means not installed', () => {
+    // The C++ believes it is reading `name -> value` and tests
+    // `! it->second.empty()` (Preset.cpp:869-872). Nothing writes that form today,
+    // so this is the branch a future release reverting to ini would need.
+    const built = buildIndex([
+      {
+        path: 'OrcaSlicer.conf',
+        text: JSON.stringify({ filaments: { 'Acme PLA @System': 'true', 'Acme ABS @System': '' } }),
+      },
+      { path: 'system/Acme/filament/a.json', text: JSON.stringify({ name: 'Acme PLA @System' }) },
+      { path: 'system/Acme/filament/b.json', text: JSON.stringify({ name: 'Acme ABS @System' }) },
+    ]);
+    expect([...built.installed.filaments]).toEqual(['Acme PLA @System']);
+  });
+});
+
+describe('filaments the slicer installs on the user’s behalf', () => {
+  // `load_installed_filaments` (PresetBundle.cpp:2541-2600): a visible vendor
+  // printer with no compatible installed filament gets its model's
+  // `default_materials` marked installed. Built here rather than in the fixture
+  // because the shape needs a printer that *nothing* installed is compatible
+  // with, and the fixture deliberately holds a filament compatible with
+  // everything.
+  const files = (installed: string[]) => [
+    {
+      path: 'OrcaSlicer.conf',
+      text: JSON.stringify({
+        filaments: installed,
+        models: [{ vendor: 'Acme', model: 'Acme Cube', nozzle_diameter: '0.4' }],
+      }),
+    },
+    {
+      path: 'system/Acme.json',
+      text: JSON.stringify({
+        machine_model_list: [{ name: 'Acme Cube', sub_path: 'machine/Acme Cube.json' }],
+      }),
+    },
+    {
+      path: 'system/Acme/machine/Acme Cube.json',
+      text: JSON.stringify({
+        name: 'Acme Cube',
+        nozzle_diameter: '0.4',
+        default_materials: 'Acme PLA @System',
+      }),
+    },
+    {
+      path: 'system/Acme/machine/p.json',
+      text: JSON.stringify({
+        name: 'Acme Cube 0.4 nozzle',
+        printer_model: 'Acme Cube',
+        printer_variant: '0.4',
+      }),
+    },
+    {
+      path: 'system/Acme/filament/default.json',
+      text: JSON.stringify({ name: 'Acme PLA @System' }),
+    },
+    // Installed, and pinned to a printer that is not this one — so it does not
+    // count as "this printer already has a filament".
+    {
+      path: 'system/Acme/filament/other.json',
+      text: JSON.stringify({ name: 'Acme ABS @System', compatible_printers: ['Other Printer'] }),
+    },
+  ];
+
+  const visibilityOf = (installed: string[], name: string) => {
+    const built = buildIndex(files(installed));
+    const p = built.presets.find((x) => x.name === name)!;
+    return visibilityIndex(built).get(p.id)!;
+  };
+
+  it('installs a printer model default when nothing installed fits that printer', () => {
+    expect(visibilityOf(['Acme ABS @System'], 'Acme PLA @System')).toMatchObject({
+      visible: true,
+      reason: 'installed-as-default',
+      evidence: { key: 'default_materials', value: 'Acme PLA @System' },
+    });
+  });
+
+  it('does not install defaults for a printer that already has one', () => {
+    // The failing direction, and the reason this is not just "always add the
+    // defaults": `add_default_materials` is set false by the first installed
+    // filament that fits (PresetBundle.cpp:2559-2566). Here `Acme ABS @System`
+    // fits, so `Acme PLA @System` stays uninstalled.
+    const built = buildIndex(
+      files(['Acme ABS @System']).map((f) =>
+        f.path === 'system/Acme/filament/other.json'
+          ? { ...f, text: JSON.stringify({ name: 'Acme ABS @System' }) }
+          : f,
+      ),
+    );
+    const p = built.presets.find((x) => x.name === 'Acme PLA @System')!;
+    expect(visibilityIndex(built).get(p.id)).toMatchObject({
+      visible: false,
+      reason: 'not-installed',
+    });
+  });
+
+  it('does not seed from a printer the user has not installed', () => {
+    // `if (printer.is_visible && …)` comes first (PresetBundle.cpp:2551). With no
+    // installed variant the printer is not in the slicer's own list, so its
+    // defaults are not installed on anyone's behalf either.
+    const built = buildIndex(
+      files(['Acme ABS @System']).map((f) =>
+        f.path === 'OrcaSlicer.conf'
+          ? {
+              ...f,
+              text: JSON.stringify({
+                filaments: ['Acme ABS @System'],
+                models: [{ vendor: 'Acme', model: 'Acme Cube', nozzle_diameter: '0.8' }],
+              }),
+            }
+          : f,
+      ),
+    );
+    const p = built.presets.find((x) => x.name === 'Acme PLA @System')!;
+    expect(visibilityIndex(built).get(p.id)).toMatchObject({ visible: false });
+  });
+
+  it('reads default_materials off the model file, in the `;` form', () => {
+    const model = index.vendorModels.find((m) => m.id === 'Acme Cube');
+    expect(model?.defaultMaterials).toEqual(['Acme PLA @System', 'Acme ABS @System']);
   });
 });
 
@@ -1261,7 +1540,7 @@ describe('transport redaction', () => {
     expect(JSON.parse(out).local_machines).toEqual({});
   });
 
-  it('reduces OrcaSlicer.conf to the one field the app needs', () => {
+  it('reduces OrcaSlicer.conf to the three fields the app needs', () => {
     const out = redactConfJson(
       JSON.stringify({
         app: { preset_folder: 'cloud-abc', other_setting: 'kept out' },
@@ -1269,16 +1548,89 @@ describe('transport redaction', () => {
         user_access_code: 'secret',
         dev_sn: { a: 'SERIAL123' },
         local_machines: { '192.0.2.5': { dev_name: 'ender' } },
+        filaments: ['Acme PLA @System'],
+        models: [{ vendor: 'Acme', model: 'Acme Cube', nozzle_diameter: '0.4' }],
       }),
     );
-    expect(JSON.parse(out)).toEqual({ app: { preset_folder: 'cloud-abc' } });
+    expect(JSON.parse(out)).toEqual({
+      app: { preset_folder: 'cloud-abc' },
+      filaments: ['Acme PLA @System'],
+      models: [{ vendor: 'Acme', model: 'Acme Cube', nozzle_diameter: '0.4' }],
+    });
     for (const leak of ['pairing-code', 'SERIAL123', '192.0.2.5', 'ender', 'secret', 'kept out']) {
       expect(out).not.toContain(leak);
     }
   });
 
+  it('rebuilds a models entry rather than forwarding it', () => {
+    // The allowlist grew by two fields, and a field is not a subtree: an entry is
+    // reassembled from the three keys `AppConfig::load` reads
+    // (AppConfig.cpp:735-746), so anything sitting beside them inside it is gone
+    // rather than merely unread. Written in the failing direction — the input
+    // carries an address that a spread or a `JSON.parse` passthrough would emit.
+    const out = redactConfJson(
+      JSON.stringify({
+        models: [
+          {
+            vendor: 'Acme',
+            model: 'Acme Cube',
+            nozzle_diameter: '0.4',
+            dev_ip: '192.0.2.77',
+            access_code: '00112233',
+          },
+        ],
+      }),
+    );
+    expect(out).not.toContain('192.0.2.77');
+    expect(out).not.toContain('00112233');
+    expect(JSON.parse(out).models).toEqual([
+      { vendor: 'Acme', model: 'Acme Cube', nozzle_diameter: '0.4' },
+    ]);
+  });
+
+  it('normalises the installed filaments to the array form the slicer writes', () => {
+    const out = JSON.parse(
+      redactConfJson(JSON.stringify({ filaments: { 'Acme PLA @System': 'true', Blank: '' } })),
+    );
+    expect(out.filaments).toEqual(['Acme PLA @System']);
+  });
+
+  it('drops a models entry that cannot gate anything', () => {
+    const out = JSON.parse(
+      redactConfJson(
+        JSON.stringify({
+          models: [{ vendor: 'Acme', nozzle_diameter: '0.4' }, { model: 'X' }, 'not an object', null],
+        }),
+      ),
+    );
+    expect(out.models).toEqual([]);
+  });
+
   it('still yields a usable conf when it cannot be parsed', () => {
     expect(JSON.parse(redactConfJson('{broken'))).toEqual({ app: { preset_folder: '' } });
+  });
+
+  it('omits a gate section it could not read instead of emitting it empty', () => {
+    // Load-bearing, and the failing direction is the dangerous one: an empty
+    // `filaments` is the claim "nothing is installed", and the reader acts on it
+    // by hiding almost every filament. Emitting that for a conf we merely failed
+    // to parse would empty the app's lists over a transport accident. Absence has
+    // to survive the trip as absence.
+    for (const input of ['{broken', JSON.stringify({ app: { preset_folder: '' } })]) {
+      const out = JSON.parse(redactConfJson(input));
+      expect(out).not.toHaveProperty('filaments');
+      expect(out).not.toHaveProperty('models');
+      expect(readInstalled([{ path: 'OrcaSlicer.conf', text: JSON.stringify(out) }]).present).toBe(
+        false,
+      );
+    }
+    // But a section the *config* stated is forwarded, empty and all: that claim is
+    // the config's, and it is a real state.
+    const stated = JSON.parse(redactConfJson(JSON.stringify({ filaments: [] })));
+    expect(stated.filaments).toEqual([]);
+    expect(
+      readInstalled([{ path: 'OrcaSlicer.conf', text: JSON.stringify(stated) }]).present,
+    ).toBe(true);
   });
 
   it('refuses to pass through a file it cannot parse', () => {

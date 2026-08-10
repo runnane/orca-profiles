@@ -16,8 +16,10 @@ import { analyze, stats } from '../domain/analyze';
 import {
   compatibilityFor,
   compatibilitySummary,
-  type Compatibility,
+  offering,
   type CompatibilityReason,
+  type Offering,
+  type VisibilityReason,
 } from '../domain/compatibility';
 import { buildIndex, type ConfigFile } from '../domain/index-config';
 import { isSensitiveKey } from '../domain/redact';
@@ -40,8 +42,15 @@ const REASON: Record<CompatibilityReason, string> = {
   'never-loaded': 'lost a name clash, so the slicer never loads it',
 };
 
-function verdictWord(v: Compatibility['included']): string {
-  return v === true ? 'available' : v === false ? 'excluded' : 'undetermined';
+/** Why a preset the user never installed is not on offer, whatever it is compatible with. */
+const NOT_INSTALLED: Partial<Record<VisibilityReason, string>> = {
+  // The verdict word already says "not installed"; these say why.
+  'not-installed': '`OrcaSlicer.conf` does not list it, so it is not in the list at all',
+  'variant-not-installed': 'this printer model and nozzle are not among the installed ones',
+};
+
+function verdictWord(v: Offering): string {
+  return v === 'not-installed' ? 'not installed' : v;
 }
 
 function readConfigDir(root: string): ConfigFile[] {
@@ -143,27 +152,39 @@ if (machines.length > 0) {
     const c = compatibilityFor(index, m);
     const f = compatibilitySummary(c.filaments);
     const pr = compatibilitySummary(c.processes);
+    const counts = (s: ReturnType<typeof compatibilitySummary>) =>
+      `${s.yes} available${s.notInstalled > 0 ? ` · ${s.notInstalled} not installed` : ''} · ${s.no} excluded${
+        s.undetermined > 0 ? ` · ${s.undetermined} undetermined` : ''
+      }`;
     console.log(`  ${m.name}`);
-    console.log(
-      `    filaments  ${f.yes} available · ${f.no} excluded${f.undetermined > 0 ? ` · ${f.undetermined} undetermined` : ''}`,
-    );
-    console.log(
-      `    processes  ${pr.yes} available · ${pr.no} excluded${pr.undetermined > 0 ? ` · ${pr.undetermined} undetermined` : ''}`,
-    );
+    console.log(`    filaments  ${counts(f)}`);
+    console.log(`    processes  ${counts(pr)}`);
     // Only the answers that need explaining: anything not plainly available, plus
     // the two that are available for a reason nobody would guess — the parent
     // clause, and a condition that matched.
     const notable = [...c.filaments, ...c.processes].filter(
-      (x) => x.included !== true || x.reason === 'named-via-parent' || x.reason === 'condition',
+      (x) => offering(x) !== 'available' || x.reason === 'named-via-parent' || x.reason === 'condition',
     );
-    for (const x of notable.slice(0, 8)) {
+    // Not installed is by far the largest group on a real config and the least
+    // interesting line by line — the count above says it. What is worth the space
+    // is everything the *compatibility* rule decided.
+    const ranked = [
+      ...notable.filter((x) => offering(x) !== 'not-installed'),
+      ...notable.filter((x) => offering(x) === 'not-installed'),
+    ];
+    for (const x of ranked.slice(0, 8)) {
+      const verdict = offering(x);
       const why =
-        x.reason === 'condition' && x.included === 'undetermined'
-          ? 'depends on a condition outside the subset we evaluate'
-          : REASON[x.reason];
-      console.log(`    ${verdictWord(x.included).padEnd(12)} ${x.preset.name} — ${why}`);
+        verdict === 'not-installed'
+          ? (NOT_INSTALLED[x.visibility.reason] ?? 'not installed')
+          : x.reason === 'condition' && x.included === 'undetermined'
+            ? 'depends on a condition outside the subset we evaluate'
+            : REASON[x.reason];
+      console.log(`    ${verdictWord(verdict).padEnd(13)} ${x.preset.name} — ${why}`);
       // The expression verbatim, for the two cases where it is the answer.
-      if (x.reason === 'condition') console.log(`                 ${x.evidence.value}`);
+      if (x.reason === 'condition' && verdict !== 'not-installed') {
+        console.log(`                  ${x.evidence.value}`);
+      }
     }
     if (notable.length > 8) console.log(`    … and ${notable.length - 8} more`);
     console.log();

@@ -71,6 +71,15 @@ test('loads a config and walks every tab without console errors', async ({ page 
   await expect(page.locator('.compat-row.undetermined').first()).toBeVisible();
   await expect(page.locator('.compat-row.excluded').first()).toBeVisible();
   await expect(page.locator('.compat-row.available').first()).toBeVisible();
+  // The installed gate is a verdict of its own, because its fix is a different
+  // one: "add this filament in OrcaSlicer", not "edit `compatible_printers`".
+  await page.getByRole('button', { name: 'not installed', exact: true }).click();
+  await expect(page.locator('.compat-row.not-installed').first()).toBeVisible();
+  await expect(page.getByText(/You have not added this filament/).first()).toBeVisible();
+  // And the compatibility answer survives as the answer to "and if I did?".
+  await expect(page.getByText(/Once installed/).first()).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/9-printer-not-installed.png`, fullPage: true });
+  await page.getByRole('button', { name: 'all', exact: true }).click();
   // The two answers nobody would guess, and the reason this view exists: a
   // condition we will not pretend to have evaluated, and a filament available only
   // because the printer inherits from a preset it names.
@@ -81,6 +90,19 @@ test('loads a config and walks every tab without console errors', async ({ page 
   // The sentence that stops a bug report being filed: available *because the
   // printer inherits from* a preset the filament names.
   await expect(page.getByText(/which Workshop Cube inherits from/).first()).toBeVisible();
+
+  // A vendor printer whose nozzle the user never installed is not one OrcaSlicer
+  // offers, so it is not in the picker's main list — and it is still reachable,
+  // grouped and named, because "why is this printer not offered" is a question
+  // this app exists to answer.
+  const printerPick = page.getByLabel('Printer', { exact: true });
+  await expect(printerPick.locator('optgroup')).toHaveAttribute('label', /Not installed/);
+  await expect(
+    printerPick.locator('optgroup > option', { hasText: 'Acme Cube 0.6 nozzle' }),
+  ).toHaveCount(1);
+  await printerPick.selectOption({ label: 'Acme Cube 0.6 nozzle · system' });
+  await expect(page.getByText('This printer is not installed.')).toBeVisible();
+  await printerPick.selectOption({ label: 'Workshop Cube · user' });
 
   // A row opens the preset it names.
   await page.locator('.compat-row').first().click();
