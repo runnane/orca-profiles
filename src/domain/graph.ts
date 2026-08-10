@@ -29,29 +29,25 @@
  *     edge that *is* the fault. The closing edge is emitted and marked `back`.
  */
 
-import { lookupParent, shadowedIds, type ConfigIndex } from './index-config';
+import {
+  classifyReference,
+  lookupParent,
+  notLoadedIds,
+  type ConfigIndex,
+  type ReferenceReason,
+} from './index-config';
 import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
 import type { Preset, PresetKind, PresetOrigin, PresetScope } from './types';
 
 /**
- * Why an `inherits` name did not resolve, as far as this module can tell.
+ * Why an `inherits` name did not resolve.
  *
- * ORCA-2 introduces `classifyReference`, which decides this once for every kind
- * of preset reference and with the slicer's own rules cited. Until that lands the
- * three cases worth distinguishing are computed here; when it does, this function
- * goes and the field is filled from the classifier instead. Keep the two in
- * agreement in the meantime — a reason is only useful if it is right.
+ * `classifyReference` decides this once for every kind of preset reference, with
+ * the slicer's own rules cited, so this is its reasons narrowed to the ones an
+ * unresolved edge can carry — the module no longer matches names itself. It used to
+ * compute three cases locally, which drifted the moment a fourth appeared.
  */
-export type EdgeReason = 'absent' | 'unloaded-profile' | 'wrong-kind';
-
-function unresolvedReason(index: ConfigIndex, from: Preset, name: string): EdgeReason {
-  // `byName` already excludes `_local/` snapshots: the slicer never loads them,
-  // so one claiming a name does not make the name exist.
-  const claimed = (index.byName.get(name) ?? []).filter((c) => c.id !== from.id);
-  if (claimed.length === 0) return 'absent';
-  if (!claimed.some((c) => c.kind === from.kind)) return 'wrong-kind';
-  return 'unloaded-profile';
-}
+export type EdgeReason = Exclude<ReferenceReason, 'resolved' | 'shadowed'>;
 
 export interface GraphNode {
   /** The preset's id, which is its path. */
@@ -150,7 +146,9 @@ export function buildGraph(index: ConfigIndex, opts: GraphOptions = {}): Inherit
 
   const nodes = new Map<string, GraphNode>();
   const edges: GraphEdge[] = [];
-  const dead = shadowedIds(index);
+  // Every preset the slicer skips, not just the clash losers: a node whose `version`
+  // does not parse is exactly as dead, and its subtree exactly as unreachable.
+  const dead = notLoadedIds(index);
   const childrenOf = new Map<string, string[]>();
 
   for (const p of included.values()) {
@@ -180,20 +178,21 @@ export function buildGraph(index: ConfigIndex, opts: GraphOptions = {}): Inherit
     });
 
     if (p.inherits) {
-      const claimants = (index.byName.get(p.inherits) ?? []).filter(
-        (c) => c.id !== p.id && c.kind === p.kind && (c.origin === 'system' || c.profile === p.profile),
-      );
+      const r = classifyReference(index, p, p.kind, p.inherits);
       edges.push({
         childId: p.id,
         parentId: parentIncluded?.id,
         name: p.inherits,
         resolved: parent !== undefined,
-        reason: parent ? undefined : unresolvedReason(index, p, p.inherits),
+        reason:
+          r.reason === 'resolved' || r.reason === 'shadowed' ? undefined : (r.reason as EdgeReason),
         // Part of a loop: following parents from the parent comes back to this
         // child. In a two-preset loop that marks both edges, which is the honest
         // answer — the loop *is* both of them, and neither is the culprit.
         back: parent !== undefined && reachesUp(index, parent, p),
-        ambiguous: claimants.length > 1,
+        // More than one file the slicer could have reached claims the name, so the
+        // edge points at the one it picks and the rest are dead files.
+        ambiguous: r.others.length > 0,
       });
       if (parentIncluded) {
         childrenOf.set(parentIncluded.id, [...(childrenOf.get(parentIncluded.id) ?? []), p.id]);

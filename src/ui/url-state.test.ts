@@ -57,6 +57,52 @@ describe('view state in the URL', () => {
     );
   });
 
+  it('round-trips the graph’s kinds, empty set included', () => {
+    // The all-off state is the one that matters: it used to be escapable only by
+    // leaving the tab, which URL state removes, so a link to it has to survive and
+    // ORCA-12's on-screen way out is what recovers from it.
+    const cases = [
+      new Set(['machine' as const]),
+      new Set(['filament' as const, 'process' as const]),
+      new Set([]),
+    ];
+    for (const graphKinds of cases) {
+      expect([...roundTrip({ ...defaultViewState(), graphKinds }).graphKinds]).toEqual([
+        ...graphKinds,
+      ]);
+    }
+  });
+
+  it('round-trips the graph’s two include-toggles', () => {
+    const view: ViewState = {
+      ...defaultViewState(),
+      graphSystemOnly: true,
+      graphInactive: true,
+    };
+    const back = roundTrip(view);
+    expect(back.graphSystemOnly).toBe(true);
+    expect(back.graphInactive).toBe(true);
+    // Each independently, so one is not carrying the other.
+    expect(roundTrip({ ...defaultViewState(), graphSystemOnly: true }).graphInactive).toBe(false);
+    expect(roundTrip({ ...defaultViewState(), graphInactive: true }).graphSystemOnly).toBe(false);
+  });
+
+  it('keeps the graph’s kinds separate from the sidebar’s', () => {
+    // They look like the same filter and are not. One key for both would make
+    // narrowing the diagram silently narrow the sidebar too.
+    const view: ViewState = {
+      ...defaultViewState(),
+      kinds: new Set(['filament']),
+      graphKinds: new Set(['machine']),
+    };
+    const back = roundTrip(view);
+    expect([...back.kinds]).toEqual(['filament']);
+    expect([...back.graphKinds]).toEqual(['machine']);
+    const search = serialiseViewState(view);
+    expect(search).toContain('kinds=filament');
+    expect(search).toContain('gkinds=machine');
+  });
+
   it('round-trips every group at once, not just one at a time', () => {
     const view: ViewState = {
       tab: 'health',
@@ -65,6 +111,9 @@ describe('view state in the URL', () => {
       origins: new Set(['system']),
       showInactive: true,
       healthKind: 'detached',
+      graphKinds: new Set(['filament', 'process']),
+      graphSystemOnly: true,
+      graphInactive: true,
     };
     expect(roundTrip(view)).toEqual(view);
   });
@@ -80,6 +129,17 @@ describe('view state in the URL', () => {
 
   it('drops an unknown kind but keeps the ones it understands', () => {
     expect([...parseViewState('?kinds=filament,nonsense').kinds]).toEqual(['filament']);
+  });
+
+  it('tells the graph’s empty set apart from a garbage value too', () => {
+    expect([...parseViewState('').graphKinds]).toEqual(['filament', 'process', 'machine']);
+    expect([...parseViewState('?gkinds=').graphKinds]).toEqual([]);
+    expect([...parseViewState('?gkinds=nonsense').graphKinds]).toEqual([
+      'filament',
+      'process',
+      'machine',
+    ]);
+    expect([...parseViewState('?gkinds=machine,nonsense').graphKinds]).toEqual(['machine']);
   });
 
   it('tells an empty set apart from a value it could make nothing of', () => {

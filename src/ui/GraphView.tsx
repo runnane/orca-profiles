@@ -69,14 +69,30 @@ const REASON_LABEL: Record<string, string> = {
 
 export function GraphView({
   index,
+  kinds,
+  includeSystemOnly,
+  includeInactive,
+  onFilters,
   onSelect,
 }: {
   index: ConfigIndex;
+  /**
+   * The three filters are owned by `App` because they live in the URL — see
+   * `url-state.ts`. They used to be local `useState`, which meant a diagram could
+   * not be linked to and, more subtly, that leaving the tab reset them: that reset
+   * was the only escape from an all-off state until ORCA-12 put one on screen.
+   */
+  kinds: Set<PresetKind>;
+  includeSystemOnly: boolean;
+  includeInactive: boolean;
+  /** Patch-shaped, so the "show everything" button is one history-free write. */
+  onFilters: (patch: {
+    kinds?: Set<PresetKind>;
+    includeSystemOnly?: boolean;
+    includeInactive?: boolean;
+  }) => void;
   onSelect: (id: string) => void;
 }) {
-  const [kinds, setKinds] = useState<Set<PresetKind>>(new Set(KINDS));
-  const [includeSystemOnly, setIncludeSystemOnly] = useState(false);
-  const [includeInactive, setIncludeInactive] = useState(false);
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -154,7 +170,7 @@ export function GraphView({
             type="button"
             className="chip"
             aria-pressed={kinds.has(k)}
-            onClick={() => setKinds(toggle(kinds, k))}
+            onClick={() => onFilters({ kinds: toggle(kinds, k) })}
           >
             {k}
           </button>
@@ -165,7 +181,7 @@ export function GraphView({
           type="button"
           className="chip"
           aria-pressed={includeSystemOnly}
-          onClick={() => setIncludeSystemOnly((v) => !v)}
+          onClick={() => onFilters({ includeSystemOnly: !includeSystemOnly })}
           title="Vendor presets nothing of yours inherits from"
         >
           include vendor-only subtrees
@@ -176,7 +192,7 @@ export function GraphView({
             type="button"
             className="chip"
             aria-pressed={includeInactive}
-            onClick={() => setIncludeInactive((v) => !v)}
+            onClick={() => onFilters({ includeInactive: !includeInactive })}
             title={`OrcaSlicer loads only user/${index.activeProfile}`}
           >
             include profiles the slicer ignores
@@ -189,7 +205,7 @@ export function GraphView({
           <div className="notice">
             <strong>No kinds selected.</strong> Nothing can be drawn until at least one of{' '}
             <em>filament</em>, <em>process</em> or <em>machine</em> is on.{' '}
-            <button type="button" className="chip" onClick={() => setKinds(new Set(KINDS))}>
+            <button type="button" className="chip" onClick={() => onFilters({ kinds: new Set(KINDS) })}>
               Show all three kinds
             </button>
           </div>
@@ -200,11 +216,13 @@ export function GraphView({
             <button
               type="button"
               className="chip"
-              onClick={() => {
-                setKinds(new Set(KINDS));
-                setIncludeSystemOnly(true);
-                setIncludeInactive(true);
-              }}
+              onClick={() =>
+                onFilters({
+                  kinds: new Set(KINDS),
+                  includeSystemOnly: true,
+                  includeInactive: true,
+                })
+              }
             >
               Show everything
             </button>

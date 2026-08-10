@@ -22,6 +22,8 @@
  *     so ordinary presets can inherit from them by name.       Preset.cpp:1583
  *  3. On a name clash the **first loaded wins** and every later file is skipped
  *     entirely — not merged, not renamed, just never loaded.   Preset.cpp:1619
+ *  4. A user preset whose `version` does not parse is dropped **silently**, and a
+ *     dropped preset cannot be anyone's parent.             Preset.cpp:1653-1655
  *
  * The vendor index matters too: `inherits` names a preset, it does not give a
  * path, so resolving a chain requires a name -> file map built from these.
@@ -29,6 +31,7 @@
 
 import { readInstalled, type InstalledState } from './installed';
 import { parseQuotedList } from './normalize';
+import { versionLoads } from './preset-version';
 import type { Preset, PresetKind, PresetScope, RawPreset } from './types';
 
 export interface ConfigFile {
@@ -112,6 +115,13 @@ export interface ConfigIndex {
   vendorRefs: VendorRef[];
   /** Printer models declared by the vendor indexes. */
   vendorModels: VendorModel[];
+  /**
+   * Active presets the slicer never loads, and why. Keyed by id.
+   *
+   * A file in this map is on disk and absent from the slicer: not selectable, and
+   * not available as a parent. See `notLoadedPresets`.
+   */
+  notLoaded: Map<string, LoadFailure>;
   /**
    * What `OrcaSlicer.conf` says the user has installed — the `is_visible` gate,
    * which is independent of compatibility and applies only to vendor presets.
@@ -344,9 +354,11 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
     else byName.set(p.name, [p]);
   }
 
+  const active = presets.filter((p) => p.scope === 'active');
+
   return {
     presets,
-    active: presets.filter((p) => p.scope === 'active'),
+    active,
     activeProfile,
     inactiveProfiles: [
       ...new Set(
@@ -360,9 +372,122 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
     vendors: [...vendors].sort(),
     vendorRefs,
     vendorModels,
+    notLoaded: notLoadedPresets(active, byName),
     installed: readInstalled(files),
     parseErrors,
   };
+}
+
+/** Why the slicer never loads a file that is nonetheless on disk. */
+export type NotLoadedReason = 'name-clash' | 'bad-version' | 'parent-not-loaded';
+
+export interface LoadFailure {
+  reason: NotLoadedReason;
+  /** For `parent-not-loaded`: the `inherits` value that could not be satisfied. */
+  parentName?: string;
+}
+
+/**
+ * Every active preset the slicer skips, and why.
+ *
+ * `PresetCollection::load_presets` has three ways to `continue` past a file, and
+ * all three leave it on disk and out of the collection. Applied in the slicer's own
+ * order, because the order is what decides which reason a file gets:
+ *
+ *  1. **name clash** — `find_preset(canonical_name)` already answers, so the file is
+ *     skipped with "Preset already present, not loading" (Preset.cpp:1617-1620).
+ *  2. **`version`** — parsed three lines before the parent lookup, and a failure is
+ *     a silent `continue` (Preset.cpp:1653-1655). See `preset-version.ts`.
+ *  3. **`inherits`** — a non-empty `inherits` that finds nothing logs "can not find
+ *     parent", counts an error and skips the file (Preset.cpp:1686-1691).
+ *
+ * The third **cascades**: a skipped preset is not in the collection, so anything
+ * naming it fails the same way. That is why this is iterated to a fixpoint rather
+ * than computed in one pass — the config in ORCA-17 lost three children to one
+ * parent, and a single pass would have found none of them.
+ *
+ * Gates 2 and 3 are **user presets only**. A system preset comes in through
+ * `parse_subfile` (PresetBundle.cpp:4836+), which has no version gate at all, and
+ * whose unresolvable-`inherits` path fails the *entire vendor bundle* rather than
+ * one preset (PresetBundle.cpp:4913-4916) — a different consequence, tracked in
+ * ORCA-10 rather than modelled here.
+ *
+ * **One corner is deliberately not modelled.** Because gate 1 runs first, a file
+ * that loses a clash stays lost even if the winner is later skipped by gate 3 — in
+ * the slicer the loser would then be read and loaded, since the "already present"
+ * check happens per file as the directory is walked. Modelling that needs the
+ * directory order the clash rules already refuse to predict (`tieIsArbitrary`), so
+ * the two are left layered and this note is the record of it.
+ */
+export function notLoadedPresets(
+  active: Preset[],
+  byName: Map<string, Preset[]>,
+): Map<string, LoadFailure> {
+  const out = new Map<string, LoadFailure>();
+
+  // Gate 2 first, because it is the only intrinsic one — it depends on nothing but
+  // the file itself — and a preset it drops was never in the collection for gate 1
+  // to clash with.
+  for (const p of active) {
+    if (p.origin === 'user' && !versionLoads(p.raw)) out.set(p.id, { reason: 'bad-version' });
+  }
+
+  // Gate 1, over what is left.
+  const groups = new Map<string, Preset[]>();
+  for (const p of active) {
+    if (out.has(p.id)) continue;
+    const scope = clashScope(p);
+    if (scope === undefined) continue;
+    groups.set(scope, [...(groups.get(scope) ?? []), p]);
+  }
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    for (const loser of loadOrder(group).slice(1)) out.set(loser.id, { reason: 'name-clash' });
+  }
+
+  // Gate 3, to a fixpoint. Each round can only add, and there are finitely many
+  // presets, so this terminates; a cycle of presets inheriting each other resolves
+  // fine here and is reported as `circular-inherits` elsewhere.
+  for (;;) {
+    let changed = false;
+    for (const p of active) {
+      if (p.origin !== 'user' || out.has(p.id) || !p.inherits) continue;
+      if (firstLoadable(byName, out, p, p.kind, p.inherits).target) continue;
+      out.set(p.id, { reason: 'parent-not-loaded', parentName: p.inherits });
+      changed = true;
+    }
+    if (!changed) break;
+  }
+
+  return out;
+}
+
+/**
+ * The claimants of `name` the slicer could reach from `from`, in load order, and
+ * which of them it would actually use.
+ *
+ * Shared by `classifyReference` and the loadability fixpoint so the two cannot
+ * drift: "which preset does this name mean" has to be one answer.
+ *
+ * `target` is the first claimant in load order that is **loaded**, not simply the
+ * first — a file the slicer skipped cannot satisfy a reference, and the next
+ * claimant is then the one it finds.
+ */
+function firstLoadable(
+  byName: Map<string, Preset[]>,
+  notLoaded: Map<string, LoadFailure>,
+  from: Preset,
+  targetKind: PresetKind,
+  name: string,
+): { ordered: Preset[]; target?: Preset } {
+  const claimed = (byName.get(name) ?? []).filter((c) => c.id !== from.id);
+  const sameKind = claimed.filter((c) => c.kind === targetKind);
+  // One `PresetCollection` holds the system bundles plus exactly one user folder
+  // (PresetBundle.cpp:528), so a user preset in another profile is not a candidate
+  // however right its name looks.
+  const inCollection = sameKind.filter((c) => c.origin === 'system' || c.profile === from.profile);
+  const ordered = loadOrder(inCollection);
+  return { ordered, target: ordered.find((c) => !notLoaded.has(c.id)) };
 }
 
 /**
@@ -386,6 +511,11 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
  *  - `unloaded-profile` it exists, in a user folder the slicer does not load
  *                       (PresetBundle.cpp:528). Editing that file changes
  *                       nothing here.
+ *  - `not-loaded`       it exists, in the folder the slicer *does* load, and the
+ *                       slicer still skipped it — a `version` that does not parse,
+ *                       or its own `inherits` failing. This is the one that reads
+ *                       as "the file is right there", and `index.notLoaded` says
+ *                       which gate it hit.
  *  - `absent`           nothing loadable claims the name.
  */
 export type ReferenceReason =
@@ -393,6 +523,7 @@ export type ReferenceReason =
   | 'shadowed'
   | 'wrong-kind'
   | 'unloaded-profile'
+  | 'not-loaded'
   | 'absent';
 
 export interface ReferenceResolution {
@@ -456,17 +587,18 @@ export function classifyReference(
   const sameKind = claimed.filter((c) => c.kind === targetKind);
   if (sameKind.length === 0) return { reason: 'wrong-kind', others: claimed, arbitrary: false };
 
-  // One `PresetCollection` holds the system bundles plus exactly one user folder
-  // (PresetBundle.cpp:528), so a user preset in another profile is not a
-  // candidate however right its name looks.
-  const loadable = sameKind.filter((c) => c.origin === 'system' || c.profile === from.profile);
-  if (loadable.length === 0) {
+  const { ordered, target } = firstLoadable(index.byName, index.notLoaded, from, targetKind, name);
+  if (ordered.length === 0) {
     return { reason: 'unloaded-profile', others: sameKind, arbitrary: false };
   }
 
-  const [target, ...others] = loadOrder(loadable);
+  // Every claimant the slicer could have reached, and it loaded none of them. The
+  // name is unsatisfiable even though the file is sitting in the loaded folder.
+  if (!target) return { reason: 'not-loaded', others: ordered, arbitrary: false };
+
+  const others = ordered.filter((c) => c.id !== target.id);
   return others.length > 0
-    ? { reason: 'shadowed', target, others, arbitrary: tieIsArbitrary(loadable) }
+    ? { reason: 'shadowed', target, others, arbitrary: tieIsArbitrary(ordered) }
     : { reason: 'resolved', target, others: [], arbitrary: false };
 }
 
@@ -581,20 +713,33 @@ export function clashScope(p: Preset): string | undefined {
  * on disk with no effect on anything, which is why callers exclude these before
  * saying anything else about them: telling someone a dead file is a detached copy
  * sends them to fix a file the slicer has never read.
+ *
+ * Read off `index.notLoaded` rather than recomputed, so the clash rule has one
+ * implementation. `notLoadedIds` is the wider set most callers actually want — a
+ * file skipped for its `version` is just as dead as one that lost a clash.
  */
 export function shadowedIds(index: ConfigIndex): Set<string> {
-  const out = new Set<string>();
-  for (const group of clashGroups(index).values()) {
-    if (group.length < 2) continue;
-    for (const loser of loadOrder(group).slice(1)) out.add(loser.id);
-  }
-  return out;
+  return new Set(
+    [...index.notLoaded].filter(([, f]) => f.reason === 'name-clash').map(([id]) => id),
+  );
 }
 
-/** Presets grouped by the scope their name has to be unique in. */
+/** Every active preset the slicer skips, whatever the reason. */
+export function notLoadedIds(index: ConfigIndex): Set<string> {
+  return new Set(index.notLoaded.keys());
+}
+
+/**
+ * Presets grouped by the scope their name has to be unique in.
+ *
+ * A preset the slicer drops for its `version` is not in the collection, so it
+ * cannot clash with anything — excluded here for the same reason `clashScope`
+ * excludes a non-instantiable base.
+ */
 export function clashGroups(index: ConfigIndex): Map<string, Preset[]> {
   const groups = new Map<string, Preset[]>();
   for (const p of index.active) {
+    if (index.notLoaded.get(p.id)?.reason === 'bad-version') continue;
     const k = clashScope(p);
     if (k === undefined) continue;
     groups.set(k, [...(groups.get(k) ?? []), p]);
