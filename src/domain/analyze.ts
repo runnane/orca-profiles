@@ -53,7 +53,7 @@ import {
 } from './index-config';
 import { declaredVersion } from './preset-version';
 import { presetReferences } from './references';
-import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
+import { chainLookup, inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
 import type { Preset, PresetKind } from './types';
 
 export type FindingSeverity = 'high' | 'medium' | 'low';
@@ -494,6 +494,32 @@ function referenceFindings(
  * printer preset is checked against a `Custom` vendor synthesised from its own
  * values (PresetBundle.cpp:2395-2416), which it cannot fail.
  */
+/**
+ * What one of `parse_subfile`'s printer guards actually costs, said once.
+ *
+ * The log text these guards emit is `"… it will be ignored"`, and the comment
+ * above them says "These presets are considered not installed"
+ * (PresetBundle.cpp:4970-4971). Both are wrong about the consequence, and the
+ * finding used to repeat them. Each guard `return`s a non-empty `reason`, and the
+ * machine loop turns that into a throw for the **whole vendor**:
+ *
+ * ```cpp
+ * if (!reason.empty()) {
+ *     ++m_errors;
+ *     throw ConfigurationError(…);
+ * }
+ * ```
+ * — PresetBundle.cpp:5161-5167
+ *
+ * The vendor is loaded into a temporary `PresetBundle` (:2253) which is merged
+ * into the app's only when nothing threw (:2271-2283), so the whole bundle goes.
+ * Marking the vendor's presets as not-loaded off the back of this is ORCA-27; the
+ * wording is corrected here because leaving a sentence in place that I know
+ * understates the damage by a whole bundle is not a smaller change than fixing it.
+ */
+const BUNDLE_ABORT = (vendor: string, line: number, logText: string): string =>
+  `A vendor printer preset that fails this check does not merely go missing: \`parse_subfile\` returns a reason (PresetBundle.cpp:${line}, logged as "${logText} … it will be ignored") and the machine loop raises a \`ConfigurationError\` for **${vendor}'s entire bundle** (PresetBundle.cpp:5161-5167), which is then never merged (PresetBundle.cpp:2271-2283). The log line understates it; every preset ${vendor} ships is absent from the slicer.`;
+
 function vendorIndexFindings(index: ConfigIndex): Finding[] {
   const out: Finding[] = [];
 
@@ -542,8 +568,27 @@ function vendorIndexFindings(index: ConfigIndex): Finding[] {
     // A vendor with no `machine_model_list` at all is a different (and much
     // louder) problem than one model missing; do not report every preset twice.
     if (!declared || declared.size === 0) continue;
-    const model = typeof p.raw.printer_model === 'string' ? p.raw.printer_model : '';
-    const variant = typeof p.raw.printer_variant === 'string' ? p.raw.printer_variant : '';
+    // **Off the chain, not off the file.** This is what ORCA-19 was about: the
+    // guard reads `config.opt_string("printer_model")` *after*
+    //
+    //     config = *default_config;      // the parent's config, out of config_maps
+    //     config.apply(config_src);      // this file's own keys over the top
+    //                                      — PresetBundle.cpp:4926-4927
+    //
+    // so it sees the **inherited** value. Reading `p.raw` instead reported every
+    // printer preset that leaves `printer_variant` to its vendor base — which is
+    // most of them — and produced 28 `HIGH` findings on one real config, all
+    // false. That they are false is also why OrcaSlicer's log had no matching
+    // line: `BOOST_LOG_TRIVIAL(error)` is well above the default level
+    // (PresetBundle.cpp:4975, :4983), so a real hit would have been recorded.
+    const look = chainLookup(index, p);
+    const settingText = (key: string): string => {
+      const v = look(key)?.value;
+      if (v === undefined) return '';
+      return Array.isArray(v) ? String(v[0] ?? '').trim() : String(v).trim();
+    };
+    const model = settingText('printer_model');
+    const variant = settingText('printer_variant');
 
     if (model === '' || !declared.has(model)) {
       out.push({
@@ -552,12 +597,14 @@ function vendorIndexFindings(index: ConfigIndex): Finding[] {
         kind: 'missing-reference',
         title:
           model === ''
-            ? `${p.name} declares no printer_model, so it is never loaded`
+            ? `${p.name} declares no printer_model, so ${p.vendor}'s whole bundle fails to load`
             : `${p.name} names a printer model ${p.vendor} does not declare`,
         detail:
-          model === ''
-            ? `A printer preset in a vendor bundle with an empty \`printer_model\` is dropped on load — "defines no printer model, it will be ignored" (PresetBundle.cpp:4972). It will not appear in the slicer at all.`
-            : `\`printer_model\` is "${model}", and \`system/${p.vendor}.json\` declares ${[...declared.keys()].map((k) => `"${k}"`).join(', ')}. The match is against the entry name in that vendor's own \`machine_model_list\` (PresetBundle.cpp:4718), so this preset is dropped on load — "defines invalid printer model … it will be ignored" (PresetBundle.cpp:4988).`,
+          `${
+            model === ''
+              ? `Neither this file nor anything it inherits from sets \`printer_model\`.`
+              : `\`printer_model\` resolves to "${model}", and \`system/${p.vendor}.json\` declares ${[...declared.keys()].map((k) => `"${k}"`).join(', ')}. The match is against the entry name in that vendor's own \`machine_model_list\` (PresetBundle.cpp:4718).`
+          } ${BUNDLE_ABORT(p.vendor, model === '' ? 4972 : 4988, model === '' ? 'defines no printer model' : 'defines invalid printer model')}`,
         presetIds: [p.id],
         reference: {
           key: 'printer_model',
@@ -576,12 +623,14 @@ function vendorIndexFindings(index: ConfigIndex): Finding[] {
         kind: 'missing-reference',
         title:
           variant === ''
-            ? `${p.name} declares no printer_variant, so it is never loaded`
+            ? `${p.name} declares no printer_variant, so ${p.vendor}'s whole bundle fails to load`
             : `${p.name} names a printer variant "${model}" does not have`,
         detail:
-          variant === ''
-            ? `A printer preset in a vendor bundle with an empty \`printer_variant\` is dropped on load — "defines no printer variant, it will be ignored" (PresetBundle.cpp:4981).`
-            : `\`printer_variant\` is "${variant}", and the model file for "${model}" lists ${variants.map((v) => `"${v}"`).join(', ')} in its \`nozzle_diameter\` (PresetBundle.cpp:4739-4747). A variant that is not one of those means the preset is dropped on load — "defines invalid printer variant … it will be ignored" (PresetBundle.cpp:4997).`,
+          `${
+            variant === ''
+              ? `Neither this file nor anything it inherits from sets \`printer_variant\`.`
+              : `\`printer_variant\` resolves to "${variant}", and the model file for "${model}" lists ${variants.map((v) => `"${v}"`).join(', ')} in its \`nozzle_diameter\` (PresetBundle.cpp:4739-4747).`
+          } ${BUNDLE_ABORT(p.vendor, variant === '' ? 4981 : 4997, variant === '' ? 'defines no printer variant' : 'defines invalid printer variant')}`,
         presetIds: [p.id],
         reference: {
           key: 'printer_variant',

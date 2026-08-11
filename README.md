@@ -465,6 +465,51 @@ only Chromium browsers have one at all.
 slicer skips) · `redundant-overrides` · `near-duplicate` · `broken-parent` ·
 `circular-inherits` · `orphaned-printer` · `missing-reference` · `parse-error`
 
+### Every check reads the resolved chain, not the file
+
+Recorded here because getting it wrong cost 28 false `HIGH` findings, and because
+the way it was caught is the more useful half.
+
+They were all of one shape — *"`<PRESET>` declares no `printer_variant`, so it is
+never loaded"* — they were **every** `HIGH` finding for that config, and they sat
+at the top of the report. What settled it was reading OrcaSlicer's own log beside
+them: **no matching line.** Two explanations, and only one survived the source.
+
+The guards log at `BOOST_LOG_TRIVIAL(error)`
+([PresetBundle.cpp:4975](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4975),
+[:4983](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4983)) —
+well above the default level, so a real hit would have been in the log. That rules
+out "it is logged too quietly". What is left is that the condition being tested was
+not the slicer's:
+
+```cpp
+config = *default_config;   // the parent's config, out of the vendor's config_maps
+config.apply(config_src);   // this file's own keys over the top
+…
+auto printer_variant = config.opt_string("printer_variant");
+```
+([PresetBundle.cpp:4926-4927](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4926),
+[:4980](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4980))
+
+The guard reads the **inherited** value. Reading the file's own key flags every
+vendor printer preset that leaves its identity to the base it was saved from —
+which is most of them.
+
+So the rule, for every check here: a preset is not a file. `printer_model`,
+`printer_variant`, `compatible_printers`, `compatible_prints`, `alias` and the
+`default_*` keys are all read off the resolved chain, because that is what the
+slicer's `preset.config` holds by the time any of them is consulted.
+
+**And the log text lies about the consequence.** These guards emit *"it will be
+ignored"*, and the comment above them says "These presets are considered not
+installed"
+([:4970](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4970)).
+Neither is true: each one returns a reason, and the machine loop turns that into a
+`ConfigurationError` for the whole vendor
+([:5161](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L5161)),
+whose bundle is then never merged. The findings say so, rather than repeating the
+slicer's own sentence.
+
 ## Credentials
 
 Machine presets carry `printhost_apikey`, `printhost_password`, `print_host` and

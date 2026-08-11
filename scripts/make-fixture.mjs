@@ -177,6 +177,29 @@ const acmeMachines = [
       printer_notes: 'PRINTER_VENDOR_ACME\nPRINTER_MODEL_CUBE\nACME_CUBE_V1',
     },
   ],
+  // **A printer preset that states neither `printer_model` nor `printer_variant`
+  // and inherits both.** This is the shape ORCA-19 is about, and it is what real
+  // vendor bundles look like — a speed or board variant saved from the base preset
+  // rather than restating its identity.
+  //
+  // The loader's guards read `config.opt_string(…)` *after* `config = *default_config;
+  // config.apply(config_src);` (PresetBundle.cpp:4926-4927), so they see the
+  // inherited values and this preset passes. Reading the file's own keys instead
+  // reported it as never loaded — 28 such findings on one real config, all false,
+  // and all at `HIGH`.
+  //
+  // Its parent is an *instantiable* preset, not an `fdm_*` base, on purpose: a base
+  // returns before the guards run (PresetBundle.cpp:4929) and so could not tell the
+  // two readings apart.
+  [
+    'Acme Cube 0.4 nozzle Fast',
+    {
+      name: 'Acme Cube 0.4 nozzle Fast',
+      instantiation: 'true',
+      inherits: 'Acme Cube 0.4 nozzle',
+      default_acceleration: '8000',
+    },
+  ],
 ];
 
 for (const [, p] of acmeFilaments) write(`system/Acme/filament/${p.name}.json`, p);

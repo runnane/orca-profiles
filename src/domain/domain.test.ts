@@ -2311,6 +2311,67 @@ describe('a failed vendor bundle takes everything the vendor ships', () => {
   });
 });
 
+describe('the printer_model / printer_variant guards read the chain', () => {
+  // ORCA-19. Over one real config the app emitted 28 `HIGH` findings of the shape
+  // "<PRESET> declares no printer_variant, so it is never loaded" — every `HIGH`
+  // finding it produced for that config — while OrcaSlicer's own log for the same
+  // config had **no** matching line.
+  //
+  // The issue offered two explanations: the slicer logs it below the default level,
+  // or the condition tested here is not the condition the slicer tests. It is the
+  // second. Two facts settle it, both read at v2.4.2:
+  //
+  //  1. The guards log at `BOOST_LOG_TRIVIAL(error)` (PresetBundle.cpp:4975, :4983),
+  //     which is well above the default level — a real hit would be in the log. So
+  //     explanation 1 is ruled out rather than merely unlikely.
+  //  2. They read `config.opt_string("printer_variant")` *after*
+  //     `config = *default_config; config.apply(config_src);` (:4926-4927) — the
+  //     value with inheritance applied, not the file's own key.
+  const findings = analyze(index);
+  const inheriting = byFile('system/Acme/machine/Acme Cube 0.4 nozzle Fast.json');
+
+  it('does not flag a preset that inherits both values', () => {
+    // The whole issue, in one assertion. This preset states neither key and
+    // inherits both from `Acme Cube 0.4 nozzle`.
+    expect(inheriting.raw.printer_model).toBeUndefined();
+    expect(inheriting.raw.printer_variant).toBeUndefined();
+    expect(resolve(index, inheriting).settings.get('printer_model')?.value).toBe('Acme Cube');
+    expect(resolve(index, inheriting).settings.get('printer_variant')?.value).toBe('0.4');
+    expect(findings.filter((f) => f.presetIds.includes(inheriting.id))).toEqual([]);
+  });
+
+  it('still flags a preset whose resolved model the vendor never declares', () => {
+    // The control in the other direction: the check must still fire. Globex's
+    // `Globex Box 0.4 nozzle` states a `printer_model` its own vendor index has no
+    // entry for, so nothing about reading the chain rescues it.
+    const box = byFile('system/Globex/machine/Globex Box 0.4 nozzle.json');
+    const f = findings.find((x) => x.id === `printer-model:${box.id}`);
+    expect(f).toBeDefined();
+    expect(f?.severity).toBe('high');
+  });
+
+  it('says the whole bundle fails, not that one preset is ignored', () => {
+    // The log text is "it will be ignored" and the finding used to repeat it. Each
+    // guard returns a reason, and the machine loop turns that into a throw for the
+    // vendor (PresetBundle.cpp:5161-5167) whose bundle is then never merged
+    // (:2271-2283). Quoting the slicer's own misleading sentence as the consequence
+    // understated it by a whole bundle.
+    const box = byFile('system/Globex/machine/Globex Box 0.4 nozzle.json');
+    const f = findings.find((x) => x.id === `printer-model:${box.id}`)!;
+    expect(f.detail).toContain("Globex's entire bundle");
+    expect(f.detail).toContain('PresetBundle.cpp:5161-5167');
+    expect(f.detail).toContain('The log line understates it');
+  });
+
+  it('reports no printer_variant finding anywhere in the fixture', () => {
+    // Every fixture printer preset either states a valid variant or inherits one,
+    // which is what a healthy bundle looks like. This is the assertion that would
+    // have caught the 28 false positives: it counts them rather than describing
+    // them.
+    expect(findings.filter((f) => f.id.startsWith('printer-variant:'))).toEqual([]);
+  });
+});
+
 describe('the dropdown’s own grouping', () => {
   // Modelled on `PlaterPresetComboBox::update` (v2.4.2 PresetComboBoxes.cpp), so
   // that the two lists can be read side by side rather than reconciled by eye.
