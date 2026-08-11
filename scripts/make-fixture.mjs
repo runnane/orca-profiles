@@ -44,6 +44,23 @@ const writeUser = (rel, { version, ...rest }) => {
   write(rel, version === null ? rest : { ...rest, version: version ?? USER_VERSION });
 };
 
+/**
+ * A vendor filament, carrying the `filament_id` every real bundle has.
+ *
+ * `parse_subfile` fails the **whole vendor bundle** for an instantiable filament
+ * with no `filament_id`, stated or inherited — "Can not find filament_id"
+ * (PresetBundle.cpp:5071-5078). A fixture whose vendor filaments had none was
+ * modelling a config in which no vendor loads at all, which is why this is filled
+ * in here rather than written out twenty times.
+ *
+ * A base is exempt: it is stored in the config map and returns before the guard
+ * (PresetBundle.cpp:4929-4941). So is the `Template` vendor, by name.
+ */
+const withFilamentId = (p, i, vendor) =>
+  p.instantiation === 'false' || p.filament_id
+    ? p
+    : { ...p, filament_id: `${vendor}${String(i).padStart(4, '0')}FILAMENT` };
+
 /** A block of plausible print settings, so "full copies" are genuinely large. */
 function bulkSettings(seed = 0) {
   const out = {};
@@ -105,7 +122,9 @@ const libraryFilaments = [
   //  3. A stated `alias`, which must win over anything derived from the name.
   ['Generic PETG @System', { name: 'Generic PETG @System', alias: 'Library PETG', inherits: 'fdm_filament_common', filament_type: 'PETG', nozzle_temperature: '240' }],
 ];
-for (const [, p] of libraryFilaments) write(`system/OrcaFilamentLibrary/filament/${p.name}.json`, p);
+libraryFilaments.forEach(([, p], i) =>
+  write(`system/OrcaFilamentLibrary/filament/${p.name}.json`, withFilamentId(p, i, 'ORCALIB')),
+);
 
 write('system/OrcaFilamentLibrary.json', {
   name: 'OrcaFilamentLibrary',
@@ -245,7 +264,9 @@ const acmeMachines = [
   ],
 ];
 
-for (const [, p] of acmeFilaments) write(`system/Acme/filament/${p.name}.json`, p);
+acmeFilaments.forEach(([, p], i) =>
+  write(`system/Acme/filament/${p.name}.json`, withFilamentId(p, i, 'ACME')),
+);
 for (const [, p] of acmeProcesses) write(`system/Acme/process/${p.name}.json`, p);
 for (const [, p] of acmeMachines) write(`system/Acme/machine/${p.name}.json`, p);
 
@@ -301,7 +322,9 @@ const globexFilaments = [
   // anything while its bundle loads.
   ['Globex ABS @System', { name: 'Globex ABS @System', inherits: 'fdm_filament_common', nozzle_temperature: '248' }],
 ];
-for (const [, p] of globexFilaments) write(`system/Globex/filament/${p.name}.json`, p);
+globexFilaments.forEach(([, p], i) =>
+  write(`system/Globex/filament/${p.name}.json`, withFilamentId(p, i, 'GLOBEX')),
+);
 
 // Globex's own machine base. Every real vendor ships its own `fdm_*` set, and it
 // has to: the library can only supply a *filament* base, because its config maps
@@ -317,10 +340,12 @@ write('system/Globex/machine/fdm_machine_common.json', {
   printable_height: '210',
 });
 
-// A vendor printer preset naming a model this vendor never declares: Globex has
-// no `machine_model_list` entry for "Globex Box", so the slicer drops the preset
-// on load rather than showing it (PresetBundle.cpp:4988). Written on purpose.
-// Its `inherits` is Globex's own base, so this preset carries that one fault only.
+// A valid Globex printer, and the model it names. Globex is a **healthy** vendor
+// on purpose: it carries the cross-vendor name clash with Acme and the
+// `renamed_from` install, and both only mean anything while its bundle loads.
+// Its two former faults — a `printer_model` this vendor never declares, and a
+// `machine_model_list` entry with no file — each kill a whole bundle (ORCA-27),
+// so they moved to Vandelay and Hooli below.
 write('system/Globex/machine/Globex Box 0.4 nozzle.json', {
   name: 'Globex Box 0.4 nozzle',
   instantiation: 'true',
@@ -329,25 +354,118 @@ write('system/Globex/machine/Globex Box 0.4 nozzle.json', {
   printer_variant: '0.4',
   nozzle_diameter: '0.4',
 });
+write('system/Globex/machine/Globex Box.json', {
+  name: 'Globex Box',
+  model_id: 'globex-box',
+  nozzle_diameter: '0.4',
+  machine_tech: 'FFF',
+  family: 'Globex',
+});
 
 write('system/Globex.json', {
   name: 'Globex',
   version: '01.00.00.00',
   description: 'Globex configurations',
-  // Declared so Globex has a model list at all, and deliberately pointing at a
-  // file that is never written: a model with no file has no variants, so it is
-  // never registered and every preset naming it is rejected.
-  machine_model_list: [{ name: 'Globex Slab', sub_path: 'machine/Globex Slab.json' }],
-  filament_list: [
-    ...globexFilaments.map(([n]) => ({ name: n, sub_path: `filament/${n}.json` })),
-    // An index entry with no file behind it — a broken install, invisible until
-    // something tries to inherit from the name.
-    { name: 'Globex TPU @System', sub_path: 'filament/Globex TPU @System.json' },
-  ],
+  machine_model_list: [{ name: 'Globex Box', sub_path: 'machine/Globex Box.json' }],
+  filament_list: globexFilaments.map(([n]) => ({ name: n, sub_path: `filament/${n}.json` })),
   process_list: [],
   machine_list: [
     { name: 'fdm_machine_common', sub_path: 'machine/fdm_machine_common.json' },
     { name: 'Globex Box 0.4 nozzle', sub_path: 'machine/Globex Box 0.4 nozzle.json' },
+  ],
+});
+
+// ─── two more vendors, each dying a different way ──────────────────────────
+// Both shapes used to live on Globex, where they read as one preset going
+// missing. They are relocated because each of them actually costs the **whole
+// vendor** (ORCA-27), and Globex has to keep loading for the cross-vendor name
+// clash and the `renamed_from` install to mean anything.
+//
+// Hooli: a `machine_model_list` entry whose file is never written. The model
+// files are read before any preset (PresetBundle.cpp:4714-4821), there is no
+// existence check, and the `catch` rethrows rather than resuming the loop
+// (:4813-4816) — so the load ends there.
+write('system/Hooli/filament/Hooli PLA @System.json', {
+  name: 'Hooli PLA @System',
+  inherits: 'fdm_filament_common',
+  filament_id: 'HOOLI0001FILAMENT',
+  nozzle_temperature: '211',
+});
+write('system/Hooli.json', {
+  name: 'Hooli',
+  version: '01.00.00.00',
+  description: 'Hooli configurations',
+  machine_model_list: [{ name: 'Hooli Slab', sub_path: 'machine/Hooli Slab.json' }],
+  filament_list: [{ name: 'Hooli PLA @System', sub_path: 'filament/Hooli PLA @System.json' }],
+  process_list: [],
+  machine_list: [],
+});
+
+// Vandelay: a `filament_list` entry whose file is never written. `parse_subfile`
+// calls `load_from_json` first thing (:4861), and that catches `ifstream::failure`,
+// `parse_error` and `std::exception` alike, setting `reason` for every one
+// (Config.cpp:278-291) — so a listed preset with nothing behind it returns a
+// reason before anything is parsed, and the vendor goes with it.
+//
+// The healthy filament beside it is the point: it is correct in every respect and
+// is absent from the slicer anyway.
+write('system/Vandelay/filament/Vandelay PLA @System.json', {
+  name: 'Vandelay PLA @System',
+  inherits: 'fdm_filament_common',
+  filament_id: 'VANDELAY01FILAMENT',
+  nozzle_temperature: '209',
+});
+write('system/Vandelay.json', {
+  name: 'Vandelay',
+  version: '01.00.00.00',
+  description: 'Vandelay configurations',
+  machine_model_list: [],
+  filament_list: [
+    { name: 'Vandelay PLA @System', sub_path: 'filament/Vandelay PLA @System.json' },
+    { name: 'Vandelay TPU @System', sub_path: 'filament/Vandelay TPU @System.json' },
+  ],
+  process_list: [],
+  machine_list: [],
+});
+
+// Bluth: a printer preset naming a model this vendor never declares. Bluth's
+// model list is real and its file is there, which is what makes this the *fourth*
+// distinct way to lose a bundle rather than a rerun of Hooli's — the loader gets
+// all the way to `it_model == current_vendor_profile->models.end()` (:4988-4997)
+// before giving up. This shape used to sit on Globex, where it read as one preset
+// being ignored.
+write('system/Bluth/machine/fdm_machine_common.json', {
+  name: 'fdm_machine_common',
+  instantiation: 'false',
+  ...bulkSettings(61),
+  printable_height: '190',
+});
+write('system/Bluth/machine/Bluth Stair Car 0.4 nozzle.json', {
+  name: 'Bluth Stair Car 0.4 nozzle',
+  instantiation: 'true',
+  inherits: 'fdm_machine_common',
+  // Declared below as "Bluth Banana", not this.
+  printer_model: 'Bluth Stair Car',
+  printer_variant: '0.4',
+  nozzle_diameter: '0.4',
+});
+write('system/Bluth/machine/Bluth Banana.json', {
+  name: 'Bluth Banana',
+  model_id: 'bluth-banana',
+  nozzle_diameter: '0.4',
+  machine_tech: 'FFF',
+  family: 'Bluth',
+});
+write('system/Bluth.json', {
+  name: 'Bluth',
+  version: '01.00.00.00',
+  description: 'Bluth configurations',
+  machine_model_list: [{ name: 'Bluth Banana', sub_path: 'machine/Bluth Banana.json' }],
+  filament_list: [],
+  process_list: [],
+  machine_list: [
+    { name: 'fdm_machine_common', sub_path: 'machine/fdm_machine_common.json' },
+    { name: 'Bluth Stair Car 0.4 nozzle', sub_path: 'machine/Bluth Stair Car 0.4 nozzle.json' },
   ],
 });
 
@@ -374,7 +492,9 @@ const initechFilaments = [
   ['Initech ABS @System', { name: 'Initech ABS @System', inherits: 'fdm_filament_abs', nozzle_temperature: '246' }],
   ['Initech PLA @System', { name: 'Initech PLA @System', inherits: 'fdm_filament_common', filament_vendor: 'Initech', filament_type: 'PLA', nozzle_temperature: '210' }],
 ];
-for (const [, p] of initechFilaments) write(`system/Initech/filament/${p.name}.json`, p);
+initechFilaments.forEach(([, p], i) =>
+  write(`system/Initech/filament/${p.name}.json`, withFilamentId(p, i, 'INITECH')),
+);
 
 write('system/Initech/machine/fdm_machine_common.json', {
   name: 'fdm_machine_common',

@@ -47,13 +47,15 @@ import {
   loadOrder,
   notLoadedIds,
   tieIsArbitrary,
+  type BundleGuard,
   type ConfigIndex,
   type LoadFailure,
   type ReferenceReason,
+  type VendorBundleFailure,
 } from './index-config';
 import { declaredVersion } from './preset-version';
 import { presetReferences } from './references';
-import { chainLookup, inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
+import { inheritanceChain, isSettingKey, ownOverrides, resolve } from './resolve';
 import type { Preset, PresetKind } from './types';
 
 export type FindingSeverity = 'high' | 'medium' | 'low';
@@ -251,7 +253,7 @@ export function analyze(index: ConfigIndex): Finding[] {
 
   findings.push(...referenceFindings(index, userPresets, shadowed, label));
   findings.push(...vendorIndexFindings(index));
-  findings.push(...crossVendorInheritFindings(index));
+  findings.push(...bundleFailureFindings(index));
 
   // A name has to be unique inside the scope the slicer keeps it in — one user
   // profile, or every vendor at once. `clashScope` is that rule; across *profiles*
@@ -499,32 +501,6 @@ function referenceFindings(
  * printer preset is checked against a `Custom` vendor synthesised from its own
  * values (PresetBundle.cpp:2395-2416), which it cannot fail.
  */
-/**
- * What one of `parse_subfile`'s printer guards actually costs, said once.
- *
- * The log text these guards emit is `"… it will be ignored"`, and the comment
- * above them says "These presets are considered not installed"
- * (PresetBundle.cpp:4970-4971). Both are wrong about the consequence, and the
- * finding used to repeat them. Each guard `return`s a non-empty `reason`, and the
- * machine loop turns that into a throw for the **whole vendor**:
- *
- * ```cpp
- * if (!reason.empty()) {
- *     ++m_errors;
- *     throw ConfigurationError(…);
- * }
- * ```
- * — PresetBundle.cpp:5161-5167
- *
- * The vendor is loaded into a temporary `PresetBundle` (:2253) which is merged
- * into the app's only when nothing threw (:2271-2283), so the whole bundle goes.
- * Marking the vendor's presets as not-loaded off the back of this is ORCA-27; the
- * wording is corrected here because leaving a sentence in place that I know
- * understates the damage by a whole bundle is not a smaller change than fixing it.
- */
-const BUNDLE_ABORT = (vendor: string, line: number, logText: string): string =>
-  `A vendor printer preset that fails this check does not merely go missing: \`parse_subfile\` returns a reason (PresetBundle.cpp:${line}, logged as "${logText} … it will be ignored") and the machine loop raises a \`ConfigurationError\` for **${vendor}'s entire bundle** (PresetBundle.cpp:5161-5167), which is then never merged (PresetBundle.cpp:2271-2283). The log line understates it; every preset ${vendor} ships is absent from the slicer.`;
-
 function vendorIndexFindings(index: ConfigIndex): Finding[] {
   const out: Finding[] = [];
 
@@ -551,176 +527,129 @@ function vendorIndexFindings(index: ConfigIndex): Finding[] {
     });
   }
 
-  const modelsByVendor = new Map<string, Map<string, string[]>>();
-  for (const m of index.vendorModels) {
-    const byId = modelsByVendor.get(m.vendor) ?? new Map<string, string[]>();
-    byId.set(m.id, m.variants);
-    modelsByVendor.set(m.vendor, byId);
-  }
-
-  for (const p of index.presets) {
-    if (p.origin !== 'system' || p.kind !== 'machine' || !p.vendor) continue;
-    // Its whole bundle is gone, which `cross-vendor-inherits` already says at the
-    // vendor level. A second finding blaming this file's `printer_model` would
-    // send someone to fix a preset that is absent for a different reason.
-    if (index.notLoaded.get(p.id)?.reason === 'bundle-failed') continue;
-    // A preset marked `instantiation: "false"` is a base for others to inherit,
-    // not a printer you can select. It is stored and returned before the model
-    // check ever runs (PresetBundle.cpp:4928), so `fdm_machine_common` having no
-    // `printer_model` is correct rather than broken.
-    if (p.raw.instantiation === 'false') continue;
-    const declared = modelsByVendor.get(p.vendor);
-    // A vendor with no `machine_model_list` at all is a different (and much
-    // louder) problem than one model missing; do not report every preset twice.
-    if (!declared || declared.size === 0) continue;
-    // **Off the chain, not off the file.** This is what ORCA-19 was about: the
-    // guard reads `config.opt_string("printer_model")` *after*
-    //
-    //     config = *default_config;      // the parent's config, out of config_maps
-    //     config.apply(config_src);      // this file's own keys over the top
-    //                                      — PresetBundle.cpp:4926-4927
-    //
-    // so it sees the **inherited** value. Reading `p.raw` instead reported every
-    // printer preset that leaves `printer_variant` to its vendor base — which is
-    // most of them — and produced 28 `HIGH` findings on one real config, all
-    // false. That they are false is also why OrcaSlicer's log had no matching
-    // line: `BOOST_LOG_TRIVIAL(error)` is well above the default level
-    // (PresetBundle.cpp:4975, :4983), so a real hit would have been recorded.
-    const look = chainLookup(index, p);
-    const settingText = (key: string): string => {
-      const v = look(key)?.value;
-      if (v === undefined) return '';
-      return Array.isArray(v) ? String(v[0] ?? '').trim() : String(v).trim();
-    };
-    const model = settingText('printer_model');
-    const variant = settingText('printer_variant');
-
-    if (model === '' || !declared.has(model)) {
-      out.push({
-        id: `printer-model:${p.id}`,
-        severity: 'high',
-        kind: 'missing-reference',
-        title:
-          model === ''
-            ? `${p.name} declares no printer_model, so ${p.vendor}'s whole bundle fails to load`
-            : `${p.name} names a printer model ${p.vendor} does not declare`,
-        detail:
-          `${
-            model === ''
-              ? `Neither this file nor anything it inherits from sets \`printer_model\`.`
-              : `\`printer_model\` resolves to "${model}", and \`system/${p.vendor}.json\` declares ${[...declared.keys()].map((k) => `"${k}"`).join(', ')}. The match is against the entry name in that vendor's own \`machine_model_list\` (PresetBundle.cpp:4718).`
-          } ${BUNDLE_ABORT(p.vendor, model === '' ? 4972 : 4988, model === '' ? 'defines no printer model' : 'defines invalid printer model')}`,
-        presetIds: [p.id],
-        reference: {
-          key: 'printer_model',
-          unresolved: [{ name: model, reason: 'absent' }],
-        },
-        weight: 870,
-      });
-      continue;
-    }
-
-    const variants = declared.get(model) ?? [];
-    if (variants.length > 0 && (variant === '' || !variants.includes(variant))) {
-      out.push({
-        id: `printer-variant:${p.id}`,
-        severity: 'high',
-        kind: 'missing-reference',
-        title:
-          variant === ''
-            ? `${p.name} declares no printer_variant, so ${p.vendor}'s whole bundle fails to load`
-            : `${p.name} names a printer variant "${model}" does not have`,
-        detail:
-          `${
-            variant === ''
-              ? `Neither this file nor anything it inherits from sets \`printer_variant\`.`
-              : `\`printer_variant\` resolves to "${variant}", and the model file for "${model}" lists ${variants.map((v) => `"${v}"`).join(', ')} in its \`nozzle_diameter\` (PresetBundle.cpp:4739-4747).`
-          } ${BUNDLE_ABORT(p.vendor, variant === '' ? 4981 : 4997, variant === '' ? 'defines no printer variant' : 'defines invalid printer variant')}`,
-        presetIds: [p.id],
-        reference: {
-          key: 'printer_variant',
-          unresolved: [{ name: variant, reason: 'absent' }],
-        },
-        weight: 860,
-      });
-    }
-  }
-
   return out;
 }
 
 /**
- * A vendor preset whose `inherits` reaches outside its own bundle.
+ * A vendor bundle that never reaches the app, and what it took with it.
  *
- * The only reference check that runs over **system** presets, and it is here rather
- * than folded into `broken-parent` because the consequence is a different size:
- * `parse_subfile` returns `"Can not find inherits"` (PresetBundle.cpp:4913-4916) and
- * the caller raises a `ConfigurationError` for that vendor's **whole bundle**
- * (:5121-5130). So this is not one preset going missing, it is every preset the
- * vendor ships.
+ * One finding per failed vendor, not one per preset: the failure *is* per bundle,
+ * and N presets reporting the same catastrophe would bury the one fact that
+ * matters. `index.failedVendors` decides who is in here and which guard fired;
+ * this only has to say it well.
  *
- * Only `other-vendor` is reported. A vendor base naming something genuinely absent
- * is a broken install rather than a modelling question, and `vendorIndexFindings`
- * already covers the index side of that.
+ * It replaces the per-preset `printer_model` / `printer_variant` findings that
+ * used to live in `vendorIndexFindings`. Those were emitted for a preset the
+ * slicer would have dropped — except it does not drop the preset, it drops the
+ * vendor (ORCA-27), so every one of them was suppressed by the bundle failure the
+ * moment that was modelled. Two findings for one fault, one of them unreachable.
  */
-function crossVendorInheritFindings(index: ConfigIndex): Finding[] {
+function bundleFailureFindings(index: ConfigIndex): Finding[] {
   const out: Finding[] = [];
-  // Grouped by vendor: the failure is per bundle, so N presets in one vendor
-  // reaching outside it is one thing to fix, not N findings saying the same.
-  const byVendor = new Map<string, { preset: Preset; parent: Preset; name: string }[]>();
 
-  for (const p of index.active) {
-    if (p.origin !== 'system' || !p.inherits || !p.vendor) continue;
-    const r = classifyReference(index, p, p.kind, p.inherits, 'inherits');
-    if (r.reason !== 'other-vendor') continue;
-    const parent = r.others[0];
-    if (!parent) continue;
-    byVendor.set(p.vendor, [...(byVendor.get(p.vendor) ?? []), { preset: p, parent, name: p.inherits }]);
-  }
-
-  for (const [vendor, hits] of byVendor) {
-    const owners = [...new Set(hits.map((h) => h.parent.vendor ?? '?'))].sort();
-    const first = hits[0];
-    // What actually disappears, so the number in the finding is the number the
-    // sidebar and the counts now show as not loaded rather than a rounder claim.
+  for (const [vendor, f] of index.failedVendors) {
     const lost = index.active.filter((p) => p.vendor === vendor && p.origin === 'system');
     const lostModels = index.vendorModels.filter((m) => m.vendor === vendor);
     const byKind = (['machine', 'filament', 'process'] as PresetKind[])
       .map((k) => ({ k, n: lost.filter((p) => p.kind === k).length }))
       .filter((x) => x.n > 0)
       .map((x) => `${x.n} ${x.k}${x.n === 1 ? '' : 's'}`);
+
+    const { title, cause, fix } = describeGuard(vendor, f);
     out.push({
-      id: `cross-vendor-inherits:${vendor}`,
+      id: `bundle-failed:${vendor}`,
       severity: 'high',
       kind: 'missing-reference',
-      title:
-        hits.length === 1
-          ? `${vendor}'s "${first.preset.name}" inherits from ${owners.join(' and ')}, which its bundle cannot see`
-          : `${hits.length} ${vendor} presets inherit from ${owners.join(' and ')}, which its bundle cannot see`,
-      detail: `${hits
-        .slice(0, 4)
-        .map((h) => `\`${h.preset.name}\` names "${h.name}"`)
-        .join(', ')}${hits.length > 4 ? ', …' : ''}. Each vendor is loaded into its own bundle and resolves \`inherits\` against that bundle plus \`${FILAMENT_LIBRARY_VENDOR}\` only — "The remaining vendors are independent (no cross-vendor inheritance)" (PresetBundle.cpp:2216-2219). A name it cannot find is not a preset with an odd parent: \`parse_subfile\` returns "Can not find inherits" (PresetBundle.cpp:4913-4916) and the caller raises a \`ConfigurationError\` for **${vendor}'s entire bundle** (PresetBundle.cpp:5121-5130), so every preset this vendor ships is absent from the slicer, not just ${hits.length === 1 ? 'this one' : 'these'}. That is ${byKind.join(', ')}${
-        lostModels.length > 0
-          ? `, and ${lostModels.length} printer model${lostModels.length === 1 ? '' : 's'} — the models are emplaced into the same temporary bundle before any preset is read (PresetBundle.cpp:4824) and only reach the app through the merge that never happens (PresetBundle.cpp:2422)`
-          : ''
-      }. Anything of yours inheriting from ${vendor} is skipped too. Move the base into \`${FILAMENT_LIBRARY_VENDOR}\`, give ${vendor} its own copy, or uninstall ${vendor}.`,
-      presetIds: hits.map((h) => h.preset.id),
-      paths: [`system/${vendor}.json`],
+      title,
+      detail:
+        `${cause} That is not one preset going missing. \`parse_subfile\` returns a reason, and the per-type loop turns it into a \`ConfigurationError\` for **${vendor}'s entire bundle** (PresetBundle.cpp:5123-5129, :5141-5147, :5161-5167); the vendor was being loaded into a temporary \`PresetBundle\` (:2253) which is merged into the app's only when nothing threw (:2271-2283). ` +
+        `So ${vendor} is absent from the slicer entirely: ${byKind.length > 0 ? byKind.join(', ') : 'every preset it ships'}${
+          lostModels.length > 0
+            ? `, and ${lostModels.length} printer model${lostModels.length === 1 ? '' : 's'} — those are emplaced into the same temporary before any preset is read (:4824) and only reach the app through the merge that never happens (:2422)`
+            : ''
+        }. Anything of yours inheriting from ${vendor} is skipped too. ${fix}` +
+        (f.guard === 'model-file-missing' || f.guard === 'printer-model-empty' || f.guard === 'printer-model-undeclared' || f.guard === 'printer-variant-empty' || f.guard === 'printer-variant-undeclared'
+          ? ' The slicer logs "it will be ignored" here, which understates it by a whole bundle.'
+          : ''),
+      presetIds: f.presetId ? [f.presetId] : [],
+      paths: [`system/${vendor}.json`, ...(f.modelPath ? [f.modelPath] : [])],
       reference: {
-        key: 'inherits',
-        targetKind: first.preset.kind,
-        unresolved: hits.map((h) => ({
-          name: h.name,
-          reason: 'other-vendor' as const,
-          targetPath: h.parent.path,
-        })),
+        key: GUARD_KEY[f.guard],
+        unresolved: [
+          {
+            name: f.inherits ?? f.value ?? f.presetName ?? vendor,
+            reason: f.guard === 'inherits' ? 'other-vendor' : 'absent',
+          },
+        ],
       },
       weight: 985,
     });
   }
 
   return out;
+}
+
+/** The config key each guard is really about, for callers that style by key. */
+const GUARD_KEY: Record<BundleGuard, string> = {
+  inherits: 'inherits',
+  'model-file-missing': 'machine_model_list',
+  'preset-file-missing': 'sub_path',
+  'printer-model-empty': 'printer_model',
+  'printer-model-undeclared': 'printer_model',
+  'printer-variant-empty': 'printer_variant',
+  'printer-variant-undeclared': 'printer_variant',
+};
+
+/** One sentence naming what tripped, and one naming the repair. */
+function describeGuard(
+  vendor: string,
+  f: VendorBundleFailure,
+): { title: string; cause: string; fix: string } {
+  const who = f.presetName ? `\`${f.presetName}\`` : 'a preset';
+  switch (f.guard) {
+    case 'inherits':
+      return {
+        title: `${vendor}'s "${f.presetName}" inherits from ${f.ownerVendor ?? 'another vendor'}, which its bundle cannot see`,
+        cause: `${who} names "${f.inherits}", and a vendor resolves \`inherits\` against its own bundle plus \`${FILAMENT_LIBRARY_VENDOR}\` only — "The remaining vendors are independent (no cross-vendor inheritance)" (PresetBundle.cpp:2216-2219).`,
+        fix: `Move the base into \`${FILAMENT_LIBRARY_VENDOR}\` — filament bases only, its config maps are handed over right after the filament loop (:5147-5151) — or give ${vendor} its own copy, or uninstall ${vendor}.`,
+      };
+    case 'model-file-missing':
+      return {
+        title: `${vendor} declares printer model "${f.value}" but its file is missing, so the whole bundle fails`,
+        cause: `\`system/${vendor}.json\` lists this model with a \`sub_path\` pointing at ${f.modelPath}, and there is no file there. The model files are read before any preset (PresetBundle.cpp:4714-4821), with no existence check and a \`catch\` that rethrows rather than resuming (:4813-4816).`,
+        fix: `Restore that file, or remove the entry from \`machine_model_list\`.`,
+      };
+    case 'preset-file-missing':
+      return {
+        title: `${vendor} lists "${f.presetName}" but its file is missing, so the whole bundle fails`,
+        cause: `\`system/${vendor}.json\` names this preset with a \`sub_path\` pointing at ${f.modelPath}, and there is no file there. \`parse_subfile\` calls \`load_from_json\` first thing (:4861), and that sets a reason for any failure to read — \`ifstream::failure\`, a parse error, or anything else (Config.cpp:278-291).`,
+        fix: `Restore that file, or remove the entry from the vendor's list.`,
+      };
+    case 'printer-model-empty':
+      return {
+        title: `${vendor}'s "${f.presetName}" declares no printer_model, so the whole bundle fails`,
+        cause: `Neither ${who} nor anything it inherits from sets \`printer_model\` (PresetBundle.cpp:4973-4979).`,
+        fix: `Give it a \`printer_model\` this vendor declares.`,
+      };
+    case 'printer-model-undeclared':
+      return {
+        title: `${vendor}'s "${f.presetName}" names a printer model ${vendor} does not declare`,
+        cause: `${who} resolves \`printer_model\` to "${f.value}", which is not an entry in this vendor's own \`machine_model_list\` (PresetBundle.cpp:4718, :4988-4997).`,
+        fix: `Correct the \`printer_model\`, or add that model to \`system/${vendor}.json\`.`,
+      };
+    case 'printer-variant-empty':
+      return {
+        title: `${vendor}'s "${f.presetName}" declares no printer_variant, so the whole bundle fails`,
+        cause: `Neither ${who} nor anything it inherits from sets \`printer_variant\` (PresetBundle.cpp:4981-4987).`,
+        fix: `Give it a \`printer_variant\` that its model's \`nozzle_diameter\` lists.`,
+      };
+    case 'printer-variant-undeclared':
+      return {
+        title: `${vendor}'s "${f.presetName}" names a printer variant its model does not have`,
+        cause: `${who} resolves \`printer_variant\` to "${f.value}", which its model's \`nozzle_diameter\` does not list (PresetBundle.cpp:4739-4747, :4998-5005).`,
+        fix: `Correct the \`printer_variant\`, or add it to the model file's \`nozzle_diameter\`.`,
+      };
+  }
 }
 
 /**
