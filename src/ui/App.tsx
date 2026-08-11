@@ -469,6 +469,11 @@ function PresetRow({
       </span>
       <span className="meta">
         {inactive ? 'not loaded · ' : ''}
+        {/* A vendor base is kept in this list on purpose — opening one to see where
+            an inherited value came from is the point of the app — but it is not a
+            preset you could select, so it says so rather than sitting here looking
+            like one. */}
+        {!preset.instantiable ? 'base · ' : ''}
         {preset.isCustomRoot ? 'root · ' : ''}
         {where ? `${where} · ` : ''}
         {stored}
@@ -499,6 +504,17 @@ function Overview({
           <span className="n">{s.system}</span>
           <span className="l">System presets</span>
         </div>
+        {/* Reported rather than silently subtracted from the figure above. A base is
+            an inheritance source, never selectable, and a count that dropped with no
+            explanation reads as presets having gone missing. */}
+        {s.bases > 0 && (
+          <div className="stat">
+            <span className="n">{s.bases}</span>
+            <span className="l" title="instantiation: false — inheritance sources, not selectable">
+              Vendor bases
+            </span>
+          </div>
+        )}
         <div className="stat">
           <span className="n">{s.vendors}</span>
           <span className="l">Vendors</span>

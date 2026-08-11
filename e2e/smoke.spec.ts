@@ -178,6 +178,34 @@ test('a link carries the view, and Back undoes the tab rather than every chip', 
   await expect(page).toHaveURL(/tab=health/);
 });
 
+test('a vendor base is drawn and labelled, not offered as a preset', async ({ page }) => {
+  // ORCA-9: bases stay visible in the graph and the sidebar, because opening one to
+  // see where an inherited value came from is the point of the app. What they must
+  // not do is read as something selectable — the printer view was listing three of
+  // them as "available" filaments before ORCA-8.
+  await page.goto('/?tab=graph');
+  await page.getByRole('button', { name: 'Load sample config' }).click();
+  await expect(page.locator('.graph-node').first()).toBeVisible({ timeout: 15000 });
+
+  // Vendor-only subtrees are off by default, and the `fdm_*` bases the fixture's
+  // user presets inherit from are drawn either way.
+  const base = page.locator('.graph-node', { hasText: 'fdm_filament_common' }).first();
+  await expect(base).toBeVisible();
+  await expect(base.getByText('vendor base')).toBeVisible();
+
+  // The overview reports them as their own figure rather than folding them into
+  // "System presets" or dropping them with no explanation.
+  await page.getByRole('tab', { name: 'Presets' }).click();
+  await expect(page.getByText('Vendor bases')).toBeVisible();
+
+  // And in the sidebar a base says so. Vendor presets are behind the `system` chip.
+  await page.getByRole('button', { name: /^system/ }).click();
+  await page.getByPlaceholder('Search presets…').fill('fdm_filament_common');
+  const row = page.locator('.row').first();
+  await expect(row).toBeVisible();
+  await expect(row.locator('.meta')).toContainText('base');
+});
+
 test('the graph’s filters survive leaving the tab, and the all-off state has a way out', async ({
   page,
 }) => {

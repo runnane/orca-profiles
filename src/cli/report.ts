@@ -100,6 +100,11 @@ if (index.inactiveProfiles.length > 0) {
 }
 console.log(`  user presets        ${s.user}`);
 console.log(`  system presets      ${s.system} from ${s.vendors} vendors`);
+// Stated rather than folded into the line above: a base is an inheritance source
+// the slicer never adds to a collection (PresetBundle.cpp:4929), so counting it as
+// a system preset inflates that figure, and dropping it silently reads as presets
+// having gone missing.
+if (s.bases > 0) console.log(`  vendor bases        ${s.bases} (not selectable)`);
 if (s.snapshots > 0) console.log(`  sync snapshots      ${s.snapshots} (ignored)`);
 if (s.deepestChain) {
   console.log(`  deepest chain       ${s.deepestChain.depth} — ${s.deepestChain.name}`);

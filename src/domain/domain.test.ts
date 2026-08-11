@@ -23,6 +23,7 @@ import { diffEffective, diffRaw } from './diff';
 import { buildGraph } from './graph';
 import {
   buildIndex,
+  clashScope,
   classifyReference,
   loadOrder,
   lookupParent,
@@ -2256,5 +2257,107 @@ describe('the dropdown’s row order', () => {
     // is exactly the one someone is trying to make sense of.
     expect(order([{ name: 'jon PLA' }, { name: 'Jon PLA' }])).toEqual(['Jon PLA', 'jon PLA']);
     expect(['jon PLA', 'Jon PLA'].sort((a, b) => a.localeCompare(b, 'en'))[0]).toBe('jon PLA');
+  });
+});
+
+describe('vendor bases are not presets you can pick', () => {
+  const findings = analyze(index);
+  const bases = index.active.filter((p) => !p.instantiable);
+
+  it('flags exactly the `fdm_*` set in the fixture', () => {
+    // Keyed by vendor as well as name, because two vendors ship a
+    // `fdm_machine_common` and that is not a mistake: the shared bundle can only
+    // supply a *filament* base (PresetBundle.cpp:5147-5151), so each vendor needs
+    // its own machine base. A name-only assertion would read as a duplicate.
+    expect(bases.map((p) => `${p.vendor}/${p.name}`).sort()).toEqual([
+      'Acme/fdm_filament_abs',
+      'Acme/fdm_machine_common',
+      'Acme/fdm_process_acme_common',
+      'Acme/fdm_process_common',
+      'Globex/fdm_machine_common',
+      'OrcaFilamentLibrary/fdm_filament_common',
+    ]);
+    // The flag is on the preset, decided once in `buildIndex`, so nothing has to
+    // re-derive it — and the `Template` exception exists in one place.
+    expect(bases.every((p) => p.raw.instantiation === 'false')).toBe(true);
+    expect(index.active.filter((p) => p.origin === 'user' && !p.instantiable)).toEqual([]);
+  });
+
+  it('keeps them out of the counts', () => {
+    // Pinned against the fixture rather than left as "greater than 5": the whole
+    // point is that a number moved, and a loose assertion would not have noticed.
+    const s = stats(index);
+    expect(s.bases).toBe(6);
+    expect(s.system).toBe(index.active.filter((p) => p.origin === 'system').length - 6);
+    expect(s.system + s.bases + s.user).toBe(index.active.length);
+    // `byKind` drives the sidebar's origin chips, so it has to agree.
+    const kindTotal = Object.values(s.byKind).reduce((n, k) => n + k.system + k.user, 0);
+    expect(kindTotal).toBe(s.system + s.user);
+  });
+
+  it('still measures the deepest chain through them', () => {
+    // Deliberately *not* filtered here: a base is a real root and the chains it
+    // roots are what the number is about. Excluding it understates every depth.
+    const s = stats(index);
+    expect(s.deepestChain).toEqual({ name: '0.28mm Draft @Acme - Copy', depth: 5 });
+    const chain = resolve(index, byFile('process/0.28mm Draft @Acme - Copy.json')).chain;
+    expect(chain.some((p) => !p.instantiable)).toBe(true);
+  });
+
+  it('keeps drawing them in the graph, labelled', () => {
+    const graph = buildGraph(index, { includeSystemOnly: true });
+    const drawn = graph.nodes.filter((n) => !n.instantiable);
+    expect(drawn.length).toBe(bases.length);
+    // The alternative — hiding them — would break every chain below them.
+    for (const b of bases) {
+      const node = graph.nodes.find((n) => n.id === b.id);
+      expect(node).toBeDefined();
+      expect(node?.instantiable).toBe(false);
+    }
+  });
+
+  it('does not report a base as a fault', () => {
+    // Pinned because it is currently true by accident: `analyze` only raises the
+    // content findings for `origin === 'user'`, and a base is always a vendor
+    // preset. A later change that widened that would start telling people to fix
+    // `fdm_filament_common`.
+    const baseIds = new Set(bases.map((p) => p.id));
+    expect(findings.filter((f) => f.presetIds.some((id) => baseIds.has(id)))).toEqual([]);
+  });
+
+  it('honours the Template vendor exception', () => {
+    // The guard is `instantiation == "false" && "Template" != vendor_name`
+    // (PresetBundle.cpp:4929), so Template's non-instantiable presets *are*
+    // constructed and do enter the collection. Easy to lose in a refactor, which is
+    // why this is its own test.
+    const built = buildIndex([
+      {
+        path: 'system/Template/filament/t.json',
+        text: JSON.stringify({ name: 'Template PLA', instantiation: 'false' }),
+      },
+      {
+        path: 'system/Acme/filament/a.json',
+        text: JSON.stringify({ name: 'Acme base', instantiation: 'false' }),
+      },
+    ]);
+    const template = built.active.find((p) => p.name === 'Template PLA')!;
+    const acme = built.active.find((p) => p.name === 'Acme base')!;
+    expect(template.instantiable).toBe(true);
+    expect(acme.instantiable).toBe(false);
+    expect(stats(built).bases).toBe(1);
+    // And it therefore *can* clash, which is the observable consequence.
+    expect(clashScope(template)).toBeDefined();
+    expect(clashScope(acme)).toBeUndefined();
+  });
+
+  it('uses one rule for the printer view and the counts', () => {
+    // `compatibilityFor` had its own copy of the instantiation check, added when the
+    // printer view was the only place the bug showed. Two copies of a rule with an
+    // exception in it is the drift this collapses.
+    const machine = byFile('machine/Workshop Cube.json');
+    const compat = compatibilityFor(index, machine);
+    const offered = new Set([...compat.filaments, ...compat.processes].map((c) => c.preset.id));
+    for (const b of bases) expect(offered.has(b.id)).toBe(false);
+    expect(offered.size).toBeGreaterThan(0);
   });
 });

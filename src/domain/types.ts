@@ -62,6 +62,26 @@ export interface Preset {
    * name (Preset.cpp:1583).
    */
   isCustomRoot: boolean;
+  /**
+   * Is this a preset you could actually select, or only an inheritance source?
+   *
+   * A vendor-bundle preset marked `instantiation: "false"` is **never added to the
+   * collection**: the loader stores it in a per-bundle config map for others to
+   * inherit and returns before constructing a `Preset`
+   * (`PresetBundle.cpp:4929-4941`). So `fdm_filament_common`,
+   * `fdm_process_common`, `fdm_machine_common` and the rest of the `fdm_*` set are
+   * not presets in the slicer's sense: they cannot be selected and they appear in
+   * no list.
+   *
+   * They are still indexed, and deliberately: resolving a chain needs them, and
+   * the whole point of the app is showing where an inherited value came from.
+   * What the flag is for is every place a count or a list means "presets you could
+   * use" — see `selectableCount` and the labels in the graph and the sidebar.
+   *
+   * The `Template` vendor is the documented exception, in the same guard.
+   * User presets never carry the key, so they are always instantiable.
+   */
+  instantiable: boolean;
   /** The `inherits` value verbatim. Empty string and undefined both mean "no parent". */
   inherits?: string;
   /** Everything on disk, metadata included. */

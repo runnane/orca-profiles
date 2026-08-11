@@ -334,6 +334,10 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
       profile,
       scope,
       isCustomRoot: isUser && segments.includes('base'),
+      // Decided once, here, rather than re-derived at each place that cares — the
+      // `Template` exception is easy to drop in a refactor, and it was already
+      // written out twice before this became a field.
+      instantiable: raw.instantiation !== 'false' || vendor === TEMPLATE_VENDOR,
       inherits,
       raw,
     });
@@ -724,21 +728,36 @@ function loadRank(p: Preset): number {
 export const FILAMENT_LIBRARY_VENDOR = 'OrcaFilamentLibrary';
 
 /**
+ * The vendor exempted from the `instantiation: "false"` rule, in the loader's own
+ * guard: `if (instantiation == "false" && "Template" != vendor_name)`
+ * (PresetBundle.cpp:4929). Its non-instantiable presets *are* constructed and do
+ * enter the collection.
+ */
+export const TEMPLATE_VENDOR = 'Template';
+
+/**
  * Is this preset one the slicer puts in a collection at all?
  *
- * A vendor-bundle preset marked `instantiation: "false"` is not: the loader stores
- * it in a per-bundle config map for others to inherit and returns before
- * constructing a `Preset` (PresetBundle.cpp:4929-4941). That map is **local to one
- * vendor's load** and cleared per preset type (:5134), which is why two vendors
- * shipping `fdm_process_common` is not a clash — the source spells it out: "The
- * remaining vendors are independent (no cross-vendor inheritance)".
- *
- * The `Template` vendor is the documented exception in the same guard.
- *
- * User presets never carry the key, so they are always instantiable.
+ * Reads `Preset.instantiable`, which `buildIndex` decides — see the field's own
+ * documentation for why, and for the `Template` exception. Kept as a function
+ * because "in a collection" is the question callers are asking, and because the
+ * config map a non-instantiable preset goes into instead is **local to one
+ * vendor's load** and cleared per preset type (PresetBundle.cpp:5133-5151), which
+ * is why two vendors shipping `fdm_process_common` is not a clash.
  */
 export function isInstantiable(p: Preset): boolean {
-  return p.raw.instantiation !== 'false' || p.vendor === 'Template';
+  return p.instantiable;
+}
+
+/**
+ * How many of these are presets a person could actually pick.
+ *
+ * The counting rule for anywhere the number means "presets you could use": the
+ * overview figures, the tab badge. A vendor base inflates that number by a large
+ * fraction on a config with several vendors installed, and it is not a preset.
+ */
+export function selectableCount(presets: Preset[]): number {
+  return presets.filter((p) => p.instantiable).length;
 }
 
 /**

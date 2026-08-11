@@ -58,6 +58,12 @@ export interface GraphNode {
   scope: PresetScope;
   /** Saved detached into `<kind>/base/` — a custom root others can inherit. */
   isCustomRoot: boolean;
+  /**
+   * False for a vendor base (`instantiation: "false"`). Drawn anyway — it is a real
+   * root carrying real settings and every chain below it depends on it — but the
+   * view has to label it, because it is not a preset anyone can select.
+   */
+  instantiable: boolean;
   /** Keys stored in the file, metadata included. */
   stored: number;
   /** Own overrides that change an inherited value. */
@@ -156,6 +162,7 @@ export function buildGraph(index: ConfigIndex, opts: GraphOptions = {}): Inherit
       origin: p.origin,
       scope: p.scope,
       isCustomRoot: p.isCustomRoot,
+      instantiable: p.instantiable,
       stored: Object.keys(p.raw).length,
       changed: o?.effective.length ?? 0,
       // A preset with no parent has no inherited value to change, so everything
