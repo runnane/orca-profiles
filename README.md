@@ -221,6 +221,7 @@ from several places, and every one of them reaches that same throw:
 | a listed preset's file cannot be read | [:4861](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4861), via [Config.cpp:278-291](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Config.cpp#L278) |
 | a `machine_model_list` file cannot be read | [:4714-4821](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4714) |
 | `inherits` resolves to nothing | [:4913](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4913) |
+| a filament has no `filament_id`, stated or inherited | [:5071](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L5071) |
 | `printer_model` empty, or not one this vendor declares | [:4973](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4973), [:4988](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4988) |
 | `printer_variant` empty, or not one that model lists | [:4981](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4981), [:4998](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4998) |
 
@@ -233,6 +234,12 @@ says the log understates it, rather than repeating the slicer's own sentence.
 A missing *file* is the one to know about, because it reads as the most harmless
 thing on that list: a single `sub_path` in a vendor index pointing at nothing —
 one line of JSON — silently costs you every preset and model that vendor ships.
+
+Most of these are rules on whoever **authored** the bundle rather than on you, and
+the `filament_id` one is purely that: it is how OrcaSlicer enforces that a vendor
+profile gives every filament an id. If you see it against a profile you installed,
+the fix is upstream, and the finding says so instead of pointing at a file of
+yours.
 
 The app marks the whole vendor as never loaded, consistently: in the counts, the
 sidebar, the graph and the printer's filament list, with one finding per vendor
