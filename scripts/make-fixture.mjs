@@ -83,12 +83,39 @@ write('system/OrcaFilamentLibrary/filament/fdm_filament_common.json', {
   nozzle_temperature: '200',
   filament_flow_ratio: '0.98',
 });
+// ── the library's own generics, and the alias the loader derives for them ──
+// `m_excluded_from` is derived, not stored: a library filament with an **empty**
+// `compatible_printers` is excluded from every printer that some *other* vendor's
+// filament of the same **alias** names (`update_library_profile_excluded_from`,
+// Preset.cpp:3704-3733). So the alias is the join key, and a vendor preset's
+// alias is never empty — stated, else the name up to the first `@` right-trimmed,
+// else the whole name (PresetBundle.cpp:5086-5097).
+//
+// Three shapes, so each branch of that derivation is pinned by something:
+const libraryFilaments = [
+  //  1. No stated `alias`, `@` in the name → alias is "Generic PLA". Acme ships a
+  //     `Generic PLA @Acme Cube` below naming the Acme Cube, so this one must be
+  //     excluded for that printer. Written with **two spaces** before the `@` on
+  //     purpose: `boost::trim_right` drops them, and the near-identical
+  //     `renamed_from` derivation on the same line does *not*, which is the one
+  //     character between two rules that must not be folded together.
+  ['Generic PLA  @System', { name: 'Generic PLA  @System', inherits: 'fdm_filament_common', filament_type: 'PLA', nozzle_temperature: '212' }],
+  //  2. No stated `alias`, no `@` at all → the alias is the whole name.
+  ['Generic TPU', { name: 'Generic TPU', inherits: 'fdm_filament_common', filament_type: 'TPU', nozzle_temperature: '225' }],
+  //  3. A stated `alias`, which must win over anything derived from the name.
+  ['Generic PETG @System', { name: 'Generic PETG @System', alias: 'Library PETG', inherits: 'fdm_filament_common', filament_type: 'PETG', nozzle_temperature: '240' }],
+];
+for (const [, p] of libraryFilaments) write(`system/OrcaFilamentLibrary/filament/${p.name}.json`, p);
+
 write('system/OrcaFilamentLibrary.json', {
   name: 'OrcaFilamentLibrary',
   version: '01.00.00.00',
   description: 'Shared filament bases',
   machine_model_list: [],
-  filament_list: [{ name: 'fdm_filament_common', sub_path: 'filament/fdm_filament_common.json' }],
+  filament_list: [
+    { name: 'fdm_filament_common', sub_path: 'filament/fdm_filament_common.json' },
+    ...libraryFilaments.map(([n]) => ({ name: n, sub_path: `filament/${n}.json` })),
+  ],
   process_list: [],
   machine_list: [],
 });
@@ -127,6 +154,22 @@ const acmeFilaments = [
   ['Acme PLA @Globex', { name: 'Acme PLA @Globex', inherits: 'fdm_filament_common', compatible_printers: [], compatible_printers_condition: 'printer_notes=~/.*GLOBEX.*/', nozzle_temperature: '213' }],
   // And one carrying the *process* gate, which is inherited the same way.
   ['Acme PLA @Fine', { name: 'Acme PLA @Fine', inherits: 'fdm_filament_common', compatible_prints: ['0.20mm Standard @Acme'], nozzle_temperature: '217' }],
+  // Acme's own tuned PLA, and the reason `m_excluded_from` exists. It states no
+  // `alias` either, so it *derives* "Generic PLA" — the same alias the library's
+  // `Generic PLA  @System` derives — and it names a printer. The library's generic
+  // is therefore excluded for the Acme Cube specifically, while staying available
+  // everywhere else. Neither file mentions the other; the join is the derived
+  // alias, which is the whole point of the rule.
+  ['Generic PLA @Acme Cube', { name: 'Generic PLA @Acme Cube', inherits: 'fdm_filament_common', compatible_printers: ['Acme Cube 0.4 nozzle'], filament_type: 'PLA', nozzle_temperature: '214' }],
+  // The same join against the library's `Generic TPU`, which has **no `@`** — so
+  // its alias is its whole name. This pins the last branch of the derivation, and
+  // it is a different printer so the two cases cannot cover for each other.
+  ['Generic TPU @Acme Cube', { name: 'Generic TPU @Acme Cube', inherits: 'fdm_filament_common', compatible_printers: ['Acme Cube 0.6 nozzle'], filament_type: 'TPU', nozzle_temperature: '228' }],
+  // And the guard on the whole thing: this derives the alias "Generic PETG", but
+  // the library's `Generic PETG @System` *states* `alias: "Library PETG"`. A
+  // stated alias wins, so no exclusion is computed and the library's PETG stays
+  // available for this printer.
+  ['Generic PETG @Acme Cube', { name: 'Generic PETG @Acme Cube', inherits: 'fdm_filament_common', compatible_printers: ['Acme Cube 0.4 nozzle'], filament_type: 'PETG', nozzle_temperature: '242' }],
 ];
 
 const acmeProcesses = [

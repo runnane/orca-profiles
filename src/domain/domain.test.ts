@@ -1254,9 +1254,8 @@ describe('printer compatibility', () => {
   it('excludes a library filament a vendor supersedes for this printer', () => {
     // `m_excluded_from` is derived, not stored: a library filament with an empty
     // `compatible_printers` inherits the exclusions of every other vendor's preset
-    // sharing its `alias` (Preset.cpp:3704-3733). Built inline because the fixture
-    // has no filament library — synthesising one there would double its size for
-    // one rule.
+    // sharing its `alias` (Preset.cpp:3704-3733). Built inline so both sides state
+    // an `alias` outright; the fixture covers the *derived* alias separately.
     const built = buildIndex([
       {
         path: 'user/default/machine/m.json',
@@ -2562,6 +2561,125 @@ describe('a user preset cannot inherit from a sibling in its own directory', () 
     // fixture's deepest chain runs through system presets, which the rule does not
     // touch — a user chain is now at most `<kind>/` → `<kind>/base/` deep.
     expect(stats(index).deepestChain).toEqual({ name: '0.28mm Draft @Acme - Copy', depth: 5 });
+  });
+});
+
+describe('the alias a library exclusion joins on is derived, not stated', () => {
+  // ORCA-23. A vendor preset's alias is never empty by the time
+  // `update_library_profile_excluded_from` compares them: stated, else the name up
+  // to the first `@` right-trimmed, else the whole name
+  // (PresetBundle.cpp:5086-5097). Keying on the stated value alone computed *no*
+  // exclusions for a library filament that states none — the exact case
+  // `m_excluded_from` exists for.
+  const cube04 = byFile('system/Acme/machine/Acme Cube 0.4 nozzle.json');
+  const cube06 = byFile('system/Acme/machine/Acme Cube 0.6 nozzle.json');
+  const workshop = byFile('user/default/machine/Workshop Cube.json');
+  const verdict = (machine: typeof cube04, name: string) =>
+    compatibilityFor(index, machine).filaments.find((x) => x.preset.name === name);
+
+  it('excludes on an alias neither file states', () => {
+    // `Generic PLA  @System` (library, no `alias`) and `Generic PLA @Acme Cube`
+    // (Acme, no `alias`, names this printer) both derive "Generic PLA". Neither
+    // file mentions the other; the derived alias is the whole join.
+    expect(verdict(cube04, 'Generic PLA  @System')).toMatchObject({
+      included: false,
+      reason: 'excluded-by-library',
+      // The derived alias, because that is what the exclusion was keyed on. The
+      // preset's own name here would read "Generic PLA  @System", which is not
+      // the value anything was joined on.
+      evidence: { key: 'alias', value: 'Generic PLA' },
+    });
+  });
+
+  it('right-trims the derived alias', () => {
+    // Two spaces before the `@` in the fixture, on purpose: `boost::trim_right`
+    // runs on the alias, and the near-identical `renamed_from` derivation on the
+    // line above concatenates *before* that trim and keeps them. One character
+    // between two rules — pinned here so folding them together goes red.
+    const lib = byFile('system/OrcaFilamentLibrary/filament/Generic PLA  @System.json');
+    expect(lib.name).toBe('Generic PLA  @System');
+    expect(verdict(cube04, lib.name)?.evidence.value).toBe('Generic PLA');
+  });
+
+  it('treats a name with no `@` as its own alias', () => {
+    // The last branch: `if (alias_name.empty()) loaded.alias = preset_name;`.
+    // `Generic TPU` has no `@`, and Acme's `Generic TPU @Acme Cube` derives the
+    // same string and names the 0.6 printer.
+    expect(verdict(cube06, 'Generic TPU')).toMatchObject({
+      included: false,
+      reason: 'excluded-by-library',
+      evidence: { key: 'alias', value: 'Generic TPU' },
+    });
+    // …and only for that printer. An exclusion is per printer, not global.
+    expect(verdict(cube04, 'Generic TPU')?.reason).not.toBe('excluded-by-library');
+  });
+
+  it('lets a stated alias win over anything derived from the name', () => {
+    // `Generic PETG @System` states `alias: "Library PETG"`, so Acme's
+    // `Generic PETG @Acme Cube` — which derives "Generic PETG" — does not join it.
+    // Without this the derivation would silently override a vendor's own choice.
+    expect(verdict(cube04, 'Generic PETG @System')?.reason).not.toBe('excluded-by-library');
+  });
+
+  it('does not exclude the library filament for an unrelated printer', () => {
+    // The control. This rule can only ever remove things from a list, so a test
+    // that an unrelated printer is unaffected carries as much weight as the
+    // failing case. `Bench Rig C` descends from a user custom root, not from an
+    // Acme Cube, and none of Acme's tuned generics names it.
+    const bench = byFile('user/default/machine/Bench Rig C.json');
+    expect(verdict(bench, 'Generic PLA  @System')?.reason).not.toBe('excluded-by-library');
+    expect(verdict(bench, 'Generic TPU')?.reason).not.toBe('excluded-by-library');
+  });
+
+  it('carries the exclusion to a user printer through its `inherits`', () => {
+    // Not an accident of the derivation, and worth pinning because the control
+    // above was written expecting the opposite: the exclusion is checked against
+    // the printer's name **or its `inherits`** (Preset.cpp:816-824). `Workshop
+    // Cube` inherits `Acme Cube 0.4 nozzle`, so Acme's tuned `Generic PLA` wins
+    // there too — which is the behaviour someone saving a printer from a vendor
+    // preset actually gets.
+    expect(workshop.inherits).toBe('Acme Cube 0.4 nozzle');
+    expect(verdict(workshop, 'Generic PLA  @System')).toMatchObject({
+      included: false,
+      reason: 'excluded-by-library',
+      evidence: { key: 'alias', value: 'Generic PLA' },
+    });
+    // And not for the alias Acme pinned to the *other* nozzle.
+    expect(verdict(workshop, 'Generic TPU')?.reason).not.toBe('excluded-by-library');
+  });
+
+  it('ignores a user filament, however its alias comes out', () => {
+    // `if (preset.vendor == nullptr …) continue;` (Preset.cpp:3718-3720) — and
+    // `vendor` is set only for presets out of a vendor bundle
+    // (PresetBundle.cpp:5057), so a user preset contributes no exclusions at all.
+    //
+    // Load-bearing precisely *because* the alias is now derived: this user preset
+    // derives "Generic PLA" from its own name, and without the guard it would
+    // exclude the library's copy for a printer the slicer never excludes it for.
+    const built = buildIndex([
+      {
+        path: 'system/OrcaFilamentLibrary/filament/lib.json',
+        text: JSON.stringify({ name: 'Generic PLA @System' }),
+      },
+      {
+        path: 'user/default/machine/m.json',
+        text: JSON.stringify({ name: 'Shop One', version: '2.4.0.3' }),
+      },
+      {
+        path: 'user/default/filament/mine.json',
+        text: JSON.stringify({
+          name: 'Generic PLA @Mine',
+          version: '2.4.0.3',
+          compatible_printers: ['Shop One'],
+        }),
+      },
+    ]);
+    const printer = built.presets.find((p) => p.name === 'Shop One')!;
+    const r = compatibilityFor(built, printer).filaments.find(
+      (x) => x.preset.name === 'Generic PLA @System',
+    );
+    expect(r?.reason).not.toBe('excluded-by-library');
+    expect(r?.included).toBe(true);
   });
 });
 
