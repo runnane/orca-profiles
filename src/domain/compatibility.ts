@@ -261,12 +261,6 @@ export interface CompatibilityOptions {
 function libraryExclusions(index: ConfigIndex): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>();
   const byAlias = new Map<string, string[]>();
-  // Both loops in the source read `preset.config.option("compatible_printers")`
-  // and `preset.alias`, so both are effective values rather than stated ones.
-  const aliasOf = (look: ChainLook) => {
-    const v = look('alias')?.value;
-    return typeof v === 'string' ? v : '';
-  };
 
   // Two passes, because within a directory the order files are read in is
   // filesystem-dependent — a one-pass version would give different exclusions on
@@ -274,24 +268,76 @@ function libraryExclusions(index: ConfigIndex): Map<string, Set<string>> {
   for (const p of index.active) {
     if (p.kind !== 'filament' || p.vendor !== FILAMENT_LIBRARY) continue;
     const look = chainLookup(index, p);
-    const alias = aliasOf(look);
-    if (alias === '' || gateNames(look, 'compatible_printers').length > 0) continue;
+    if (gateNames(look, 'compatible_printers').length > 0) continue;
     out.set(p.id, new Set());
+    const alias = vendorAlias(p, look);
     byAlias.set(alias, [...(byAlias.get(alias) ?? []), p.id]);
   }
 
   for (const p of index.active) {
-    if (p.kind !== 'filament' || p.vendor === FILAMENT_LIBRARY) continue;
+    // `if (preset.vendor == nullptr || preset.vendor->name == ORCA_FILAMENT_LIBRARY)
+    // continue;` (Preset.cpp:3718-3720). `vendor` is set only for presets loaded
+    // out of a vendor bundle (PresetBundle.cpp:5057), so `nullptr` is a **user**
+    // preset and user presets contribute no exclusions at all.
+    //
+    // Load-bearing since the alias is derived rather than read: a user filament
+    // has an alias too, from a third rule entirely (`set_custom_preset_alias`,
+    // Preset.cpp:3750-3775), and without this guard one saved from a vendor preset
+    // would start excluding library filaments the slicer never excludes.
+    if (p.kind !== 'filament' || p.origin !== 'system' || p.vendor === FILAMENT_LIBRARY) continue;
     const look = chainLookup(index, p);
     const claims = gateNames(look, 'compatible_printers');
     if (claims.length === 0) continue;
-    for (const libraryId of byAlias.get(aliasOf(look)) ?? []) {
+    for (const libraryId of byAlias.get(vendorAlias(p, look)) ?? []) {
       const set = out.get(libraryId);
       for (const name of claims) set?.add(name);
     }
   }
 
   return out;
+}
+
+/**
+ * A vendor preset's `alias` as the slicer holds it, which is **never empty**.
+ *
+ * The bundle may state one — read off the chain, because `parse_subfile` reads
+ * `config.has("alias")` after `config.apply(config_src)` (PresetBundle.cpp:4926,
+ * :4943), so an inherited `alias` counts. When it does not, the loader derives it:
+ *
+ * ```cpp
+ * if (alias_name.empty()) {
+ *     size_t end_pos = preset_name.find_first_of("@");
+ *     if (end_pos != std::string::npos) {
+ *         alias_name = preset_name.substr(0, end_pos);
+ *         …
+ *         boost::trim_right(alias_name);
+ *     }
+ * }
+ * if (alias_name.empty())
+ *     loaded.alias = preset_name;
+ * ```
+ * — PresetBundle.cpp:5086-5097
+ *
+ * So `Generic PLA @Acme Cube` has the alias `Generic PLA` whether or not its file
+ * says so, and a name with no `@` is its own alias. That trailing fallback is why
+ * treating an empty alias as "no alias" was wrong rather than merely incomplete:
+ * a vendor preset never reaches `update_library_profile_excluded_from` with one.
+ *
+ * **Nearly the same as `renamedFrom`'s derivation, and deliberately not shared.**
+ * The `renamed_from` line runs *before* `boost::trim_right` and concatenates, so
+ * it keeps the space before the `@`; this one trims first and drops it. Two rules
+ * one character apart — folding them together would make each one's tests cover
+ * for the other.
+ */
+function vendorAlias(p: Preset, look: ChainLook): string {
+  const stated = look('alias')?.value;
+  if (typeof stated === 'string' && stated !== '') return stated;
+  const at = p.name.indexOf('@');
+  if (at < 0) return p.name;
+  const derived = p.name.slice(0, at).replace(/\s+$/, '');
+  // `substr(0, 0)` on a name starting with `@` trims to nothing, and the guard
+  // below it in the source then falls back to the whole name.
+  return derived === '' ? p.name : derived;
 }
 
 /** A reader over one preset's inheritance chain — see `chainLookup`. */
@@ -640,14 +686,14 @@ function judgePrinter(
   // 1. The library exclusion, which is checked first and by itself.
   const excluded = exclusions.get(p.id);
   if (excluded && (excluded.has(machine.name) || (machine.inherits && excluded.has(machine.inherits)))) {
-    const alias = look('alias')?.value;
     return {
       included: false,
       reason: 'excluded-by-library',
-      evidence: {
-        key: 'alias',
-        value: typeof alias === 'string' ? alias : p.name,
-      },
+      // The *derived* alias, not the stated one: it is the value the exclusion was
+      // joined on, and for a preset that states none it is the only answer that
+      // explains the verdict. Falling back to the preset's own name here printed
+      // "alias: Generic PLA @System" for an exclusion keyed on "Generic PLA".
+      evidence: { key: 'alias', value: vendorAlias(p, look) },
     };
   }
 
