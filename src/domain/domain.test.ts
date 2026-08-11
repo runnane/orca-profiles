@@ -50,6 +50,27 @@ function byFile(file: string) {
   return p;
 }
 
+/**
+ * A vendor filament as a real bundle ships one.
+ *
+ * `parse_subfile` fails the **whole vendor bundle** for an instantiable filament
+ * with no `filament_id`, stated or inherited — "Can not find filament_id"
+ * (PresetBundle.cpp:5071-5078). A synthetic config without one is therefore a
+ * config the slicer cannot load, and every test built on it would be asserting
+ * about a vendor that is not there.
+ *
+ * It lives here rather than in thirty literals because it is boilerplate: not one
+ * test below is *about* `filament_id`, and spelling it out each time would bury
+ * what each one actually asserts. The tests that ARE about it write their own
+ * literals, so the thing under test is never supplied by the helper.
+ *
+ * Mirrors `withFilamentId` in `scripts/make-fixture.mjs`. `raw` wins, so a caller
+ * can still state its own id.
+ */
+function sysFilament(path: string, raw: Record<string, unknown>) {
+  return { path, text: JSON.stringify({ filament_id: 'TESTFIL0001', ...raw }) };
+}
+
 describe('index', () => {
   it('parses the fixture without errors', () => {
     expect(index.parseErrors).toEqual([]);
@@ -457,10 +478,7 @@ describe('dangling references', () => {
     // `Generic … @System` (Preset.cpp:3229-3245). Not modelling that reports a
     // parent as missing when the slicer finds it.
     const built = buildIndex([
-      {
-        path: 'system/OrcaFilamentLibrary/filament/Generic PLA @System.json',
-        text: JSON.stringify({ name: 'Generic PLA @System', layer_height: '0.2' }),
-      },
+      sysFilament('system/OrcaFilamentLibrary/filament/Generic PLA @System.json', { name: 'Generic PLA @System', layer_height: '0.2' }),
       {
         path: 'user/default/filament/Mine.json',
         text: JSON.stringify({ name: 'Mine', inherits: 'Generic PLA' }),
@@ -1285,18 +1303,12 @@ describe('printer compatibility', () => {
         path: 'user/default/machine/Shop One.json',
         text: JSON.stringify({ name: 'Shop One', inherits: 'Vendor Base 0.4' }),
       },
-      {
-        path: 'system/OrcaFilamentLibrary/filament/Generic PLA @System.json',
-        text: JSON.stringify({ name: 'Generic PLA @System', alias: 'Generic PLA' }),
-      },
-      {
-        path: 'system/Acme/filament/Generic PLA @Acme.json',
-        text: JSON.stringify({
+      sysFilament('system/OrcaFilamentLibrary/filament/Generic PLA @System.json', { name: 'Generic PLA @System', alias: 'Generic PLA' }),
+      sysFilament('system/Acme/filament/Generic PLA @Acme.json', {
           name: 'Generic PLA @Acme',
           alias: 'Generic PLA',
           compatible_printers: ['Vendor Base 0.4'],
         }),
-      },
     ]);
     const printer = built.presets.find((p) => p.name === 'Shop One')!;
     const r = compatibilityFor(built, printer);
@@ -1330,14 +1342,8 @@ describe('printer compatibility', () => {
     // (PresetBundle.cpp:4929), so a Template-vendor base *is* loaded.
     const built = buildIndex([
       { path: 'user/default/machine/M.json', text: JSON.stringify({ name: 'M' }) },
-      {
-        path: 'system/Template/filament/base.json',
-        text: JSON.stringify({ name: 'Template Base', instantiation: 'false' }),
-      },
-      {
-        path: 'system/Acme/filament/base.json',
-        text: JSON.stringify({ name: 'Acme Base', instantiation: 'false' }),
-      },
+      sysFilament('system/Template/filament/base.json', { name: 'Template Base', instantiation: 'false' }),
+      sysFilament('system/Acme/filament/base.json', { name: 'Acme Base', instantiation: 'false' }),
     ]);
     const r = compatibilityFor(built, built.presets.find((p) => p.name === 'M')!);
     const names = r.filaments.map((x) => x.preset.name);
@@ -1591,10 +1597,7 @@ describe('the installed gate', () => {
     // installed, and gating on that would empty the list on our own ignorance —
     // the same instinct as "a condition we cannot evaluate means compatible".
     const built = buildIndex([
-      {
-        path: 'system/Acme/filament/f.json',
-        text: JSON.stringify({ name: 'Acme PLA @System' }),
-      },
+      sysFilament('system/Acme/filament/f.json', { name: 'Acme PLA @System' }),
     ]);
     expect(built.installed.present).toBe(false);
     const v = visibilityIndex(built);
@@ -1610,8 +1613,8 @@ describe('the installed gate', () => {
         path: 'OrcaSlicer.conf',
         text: JSON.stringify({ filaments: { 'Acme PLA @System': 'true', 'Acme ABS @System': '' } }),
       },
-      { path: 'system/Acme/filament/a.json', text: JSON.stringify({ name: 'Acme PLA @System' }) },
-      { path: 'system/Acme/filament/b.json', text: JSON.stringify({ name: 'Acme ABS @System' }) },
+      sysFilament('system/Acme/filament/a.json', { name: 'Acme PLA @System' }),
+      sysFilament('system/Acme/filament/b.json', { name: 'Acme ABS @System' }),
     ]);
     expect([...built.installed.filaments]).toEqual(['Acme PLA @System']);
   });
@@ -1654,16 +1657,10 @@ describe('filaments the slicer installs on the user’s behalf', () => {
         printer_variant: '0.4',
       }),
     },
-    {
-      path: 'system/Acme/filament/default.json',
-      text: JSON.stringify({ name: 'Acme PLA @System' }),
-    },
+    sysFilament('system/Acme/filament/default.json', { name: 'Acme PLA @System' }),
     // Installed, and pinned to a printer that is not this one — so it does not
     // count as "this printer already has a filament".
-    {
-      path: 'system/Acme/filament/other.json',
-      text: JSON.stringify({ name: 'Acme ABS @System', compatible_printers: ['Other Printer'] }),
-    },
+    sysFilament('system/Acme/filament/other.json', { name: 'Acme ABS @System', compatible_printers: ['Other Printer'] }),
   ];
 
   const visibilityOf = (installed: string[], name: string) => {
@@ -1770,14 +1767,8 @@ describe('cross-vendor name clashes', () => {
     // (no cross-vendor inheritance)", says the source. Reporting it would be a
     // false finding.
     const built = buildIndex([
-      {
-        path: 'system/Acme/filament/base.json',
-        text: JSON.stringify({ name: 'fdm_filament_common', instantiation: 'false' }),
-      },
-      {
-        path: 'system/Globex/filament/base.json',
-        text: JSON.stringify({ name: 'fdm_filament_common', instantiation: 'false' }),
-      },
+      sysFilament('system/Acme/filament/base.json', { name: 'fdm_filament_common', instantiation: 'false' }),
+      sysFilament('system/Globex/filament/base.json', { name: 'fdm_filament_common', instantiation: 'false' }),
     ]);
     expect(analyze(built).filter((f) => f.kind === 'duplicate-name')).toEqual([]);
     expect(shadowedIds(built).size).toBe(0);
@@ -1788,14 +1779,8 @@ describe('cross-vendor name clashes', () => {
     // other vendor is merged (PresetBundle.cpp:2231-2241), so this clash is not a
     // coin toss and must not be reported as one.
     const built = buildIndex([
-      {
-        path: 'system/OrcaFilamentLibrary/filament/x.json',
-        text: JSON.stringify({ name: 'Generic PLA @System' }),
-      },
-      {
-        path: 'system/Acme/filament/x.json',
-        text: JSON.stringify({ name: 'Generic PLA @System' }),
-      },
+      sysFilament('system/OrcaFilamentLibrary/filament/x.json', { name: 'Generic PLA @System' }),
+      sysFilament('system/Acme/filament/x.json', { name: 'Generic PLA @System' }),
     ]);
     const f = analyze(built).find((x) => x.kind === 'duplicate-name');
     expect(f?.detail).toContain('merged first and always wins');
@@ -1811,14 +1796,8 @@ describe('cross-vendor name clashes', () => {
     // (PresetBundle.cpp:4929), so a Template-vendor base *is* loaded — and can
     // therefore clash. Easy to lose in a refactor, so it is pinned.
     const built = buildIndex([
-      {
-        path: 'system/Template/filament/x.json',
-        text: JSON.stringify({ name: 'Shared Base', instantiation: 'false' }),
-      },
-      {
-        path: 'system/Acme/filament/x.json',
-        text: JSON.stringify({ name: 'Shared Base' }),
-      },
+      sysFilament('system/Template/filament/x.json', { name: 'Shared Base', instantiation: 'false' }),
+      sysFilament('system/Acme/filament/x.json', { name: 'Shared Base' }),
     ]);
     expect(analyze(built).filter((f) => f.kind === 'duplicate-name')).toHaveLength(1);
   });
@@ -2167,9 +2146,9 @@ describe('a vendor inherits inside its own bundle', () => {
 
   it('groups one finding per vendor, not one per preset', () => {
     const built = buildIndex([
-      { path: 'system/Acme/filament/b.json', text: JSON.stringify({ name: 'acme_base', instantiation: 'false' }) },
-      { path: 'system/Globex/filament/x.json', text: JSON.stringify({ name: 'X', inherits: 'acme_base' }) },
-      { path: 'system/Globex/filament/y.json', text: JSON.stringify({ name: 'Y', inherits: 'acme_base' }) },
+      sysFilament('system/Acme/filament/b.json', { name: 'acme_base', instantiation: 'false' }),
+      sysFilament('system/Globex/filament/x.json', { name: 'X', inherits: 'acme_base' }),
+      sysFilament('system/Globex/filament/y.json', { name: 'Y', inherits: 'acme_base' }),
     ]);
     // One finding, naming one violating preset — not two findings, and not a list
     // of every preset the vendor happens to ship. The failure is per bundle.
@@ -2202,11 +2181,8 @@ describe('a vendor inherits inside its own bundle', () => {
   it('does not let the library itself reach another vendor', () => {
     // It is loaded with no `base_bundle` of its own (PresetBundle.cpp:2231-2241).
     const built = buildIndex([
-      { path: 'system/Acme/filament/b.json', text: JSON.stringify({ name: 'acme_base', instantiation: 'false' }) },
-      {
-        path: 'system/OrcaFilamentLibrary/filament/x.json',
-        text: JSON.stringify({ name: 'Lib PLA', inherits: 'acme_base' }),
-      },
+      sysFilament('system/Acme/filament/b.json', { name: 'acme_base', instantiation: 'false' }),
+      sysFilament('system/OrcaFilamentLibrary/filament/x.json', { name: 'Lib PLA', inherits: 'acme_base' }),
     ]);
     const from = built.active.find((p) => p.name === 'Lib PLA')!;
     expect(classifyReference(built, from, 'filament', 'acme_base', 'inherits').reason).toBe(
@@ -2235,13 +2211,10 @@ describe('a vendor inherits inside its own bundle', () => {
         path: 'system/Acme/machine/p.json',
         text: JSON.stringify({ name: 'Acme Cube 0.4 nozzle', instantiation: 'true' }),
       },
-      {
-        path: 'system/Globex/filament/f.json',
-        text: JSON.stringify({
+      sysFilament('system/Globex/filament/f.json', {
           name: 'Globex PLA',
           compatible_printers: ['Acme Cube 0.4 nozzle'],
         }),
-      },
     ]);
     const from = built.active.find((p) => p.name === 'Globex PLA')!;
     expect(classifyReference(built, from, 'machine', 'Acme Cube 0.4 nozzle').reason).toBe('resolved');
@@ -2384,18 +2357,9 @@ describe('a failed vendor bundle takes everything the vendor ships', () => {
 
   it('cascades into a user preset that inherits from the dropped vendor', () => {
     const built = buildIndex([
-      {
-        path: 'system/Acme/filament/base.json',
-        text: JSON.stringify({ name: 'acme_base', instantiation: 'false' }),
-      },
-      {
-        path: 'system/Initech/filament/bad.json',
-        text: JSON.stringify({ name: 'Initech ABS', inherits: 'acme_base' }),
-      },
-      {
-        path: 'system/Initech/filament/ok.json',
-        text: JSON.stringify({ name: 'Initech PLA' }),
-      },
+      sysFilament('system/Acme/filament/base.json', { name: 'acme_base', instantiation: 'false' }),
+      sysFilament('system/Initech/filament/bad.json', { name: 'Initech ABS', inherits: 'acme_base' }),
+      sysFilament('system/Initech/filament/ok.json', { name: 'Initech PLA' }),
       {
         path: 'user/default/filament/Mine.json',
         text: JSON.stringify({ name: 'Mine', version: '2.4.0.3', inherits: 'Initech PLA' }),
@@ -2416,10 +2380,7 @@ describe('a failed vendor bundle takes everything the vendor ships', () => {
     // report an absent name, and a vendor emptying out with nothing on screen to
     // explain it is worse than one wrongly present.
     const built = buildIndex([
-      {
-        path: 'system/Initech/filament/x.json',
-        text: JSON.stringify({ name: 'X', inherits: 'nothing_has_this_name' }),
-      },
+      sysFilament('system/Initech/filament/x.json', { name: 'X', inherits: 'nothing_has_this_name' }),
     ]);
     expect(built.failedVendors.size).toBe(0);
     expect(built.notLoaded.size).toBe(0);
@@ -2429,14 +2390,8 @@ describe('a failed vendor bundle takes everything the vendor ships', () => {
     // The control for the whole rule. A healthy two-vendor config must come back
     // with nothing marked at all.
     const built = buildIndex([
-      {
-        path: 'system/OrcaFilamentLibrary/filament/base.json',
-        text: JSON.stringify({ name: 'fdm_filament_common', instantiation: 'false' }),
-      },
-      {
-        path: 'system/Acme/filament/a.json',
-        text: JSON.stringify({ name: 'Acme PLA', inherits: 'fdm_filament_common' }),
-      },
+      sysFilament('system/OrcaFilamentLibrary/filament/base.json', { name: 'fdm_filament_common', instantiation: 'false' }),
+      sysFilament('system/Acme/filament/a.json', { name: 'Acme PLA', inherits: 'fdm_filament_common' }),
       {
         path: 'system/Globex/machine/base.json',
         text: JSON.stringify({ name: 'globex_base', instantiation: 'false' }),
@@ -2453,13 +2408,10 @@ describe('a failed vendor bundle takes everything the vendor ships', () => {
 
   it('fails each violating bundle separately, and only those', () => {
     const built = buildIndex([
-      {
-        path: 'system/Acme/filament/base.json',
-        text: JSON.stringify({ name: 'acme_base', instantiation: 'false' }),
-      },
-      { path: 'system/Acme/filament/a.json', text: JSON.stringify({ name: 'Acme PLA', inherits: 'acme_base' }) },
-      { path: 'system/Globex/filament/g.json', text: JSON.stringify({ name: 'Globex PLA', inherits: 'acme_base' }) },
-      { path: 'system/Initech/filament/i.json', text: JSON.stringify({ name: 'Initech PLA', inherits: 'acme_base' }) },
+      sysFilament('system/Acme/filament/base.json', { name: 'acme_base', instantiation: 'false' }),
+      sysFilament('system/Acme/filament/a.json', { name: 'Acme PLA', inherits: 'acme_base' }),
+      sysFilament('system/Globex/filament/g.json', { name: 'Globex PLA', inherits: 'acme_base' }),
+      sysFilament('system/Initech/filament/i.json', { name: 'Initech PLA', inherits: 'acme_base' }),
     ]);
     expect([...built.failedVendors.keys()].sort()).toEqual(['Globex', 'Initech']);
     expect(built.notLoaded.has('system/Acme/filament/a.json')).toBe(false);
@@ -2763,10 +2715,7 @@ describe('the alias a library exclusion joins on is derived, not stated', () => 
     // derives "Generic PLA" from its own name, and without the guard it would
     // exclude the library's copy for a printer the slicer never excludes it for.
     const built = buildIndex([
-      {
-        path: 'system/OrcaFilamentLibrary/filament/lib.json',
-        text: JSON.stringify({ name: 'Generic PLA @System' }),
-      },
+      sysFilament('system/OrcaFilamentLibrary/filament/lib.json', { name: 'Generic PLA @System' }),
       {
         path: 'user/default/machine/Shop One.json',
         text: JSON.stringify({ name: 'Shop One', version: '2.4.0.3' }),
@@ -3228,14 +3177,11 @@ describe('the dropdown’s row order', () => {
   const files = (names: { name: string; vendor?: string; type?: string }[]) => [
     { path: 'OrcaSlicer.conf', text: JSON.stringify({ filaments: names.map((n) => n.name), models: [] }) },
     { path: 'user/default/machine/Mine.json', text: JSON.stringify({ name: 'Mine' }) },
-    ...names.map((n, i) => ({
-      path: `system/V/filament/f${i}.json`,
-      text: JSON.stringify({
+    ...names.map((n, i) => (sysFilament(`system/V/filament/f${i}.json`, {
         name: n.name,
         ...(n.vendor === undefined ? {} : { filament_vendor: n.vendor }),
         ...(n.type === undefined ? {} : { filament_type: n.type }),
-      }),
-    })),
+      }))),
   ];
   const order = (names: { name: string; vendor?: string; type?: string }[], group = 'system') => {
     const built = buildIndex(files(names));
@@ -3368,14 +3314,8 @@ describe('vendor bases are not presets you can pick', () => {
     // constructed and do enter the collection. Easy to lose in a refactor, which is
     // why this is its own test.
     const built = buildIndex([
-      {
-        path: 'system/Template/filament/t.json',
-        text: JSON.stringify({ name: 'Template PLA', instantiation: 'false' }),
-      },
-      {
-        path: 'system/Acme/filament/a.json',
-        text: JSON.stringify({ name: 'Acme base', instantiation: 'false' }),
-      },
+      sysFilament('system/Template/filament/t.json', { name: 'Template PLA', instantiation: 'false' }),
+      sysFilament('system/Acme/filament/a.json', { name: 'Acme base', instantiation: 'false' }),
     ]);
     const template = built.active.find((p) => p.name === 'Template PLA')!;
     const acme = built.active.find((p) => p.name === 'Acme base')!;
