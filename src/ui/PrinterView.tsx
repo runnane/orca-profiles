@@ -148,15 +148,24 @@ function compatibilitySentence(c: Compatibility, machine: Preset): string {
 export function PrinterView({
   index,
   machineId,
+  processId,
   onPickMachine,
+  onPickProcess,
   onSelect,
 }: {
   index: ConfigIndex;
   machineId: string;
+  /**
+   * Lifted to the URL (ORCA-16) rather than held here. It is half of the answer to
+   * "why is this filament not offered" — the process gate and the printer gate are
+   * anded together — so a link that carries the printer and not the process shows
+   * a different verdict from the one the sender was looking at.
+   */
+  processId: string;
   onPickMachine: (id: string) => void;
+  onPickProcess: (id: string) => void;
   onSelect: (id: string) => void;
 }) {
-  const [processId, setProcessId] = useState('');
   const [only, setOnly] = useState<Offering | 'all'>('all');
 
   const visibility = useMemo(() => visibilityIndex(index), [index]);
@@ -221,7 +230,7 @@ export function PrinterView({
           <label className="label-section" htmlFor="process-pick" style={{ display: 'block', marginBottom: 4 }}>
             Scoped to process (optional)
           </label>
-          <select id="process-pick" value={processId} onChange={(e) => setProcessId(e.target.value)}>
+          <select id="process-pick" value={processId} onChange={(e) => onPickProcess(e.target.value)}>
             <option value="">Printer only — ignore the process gate</option>
             {result?.processes
               .filter((c) => offering(c) === 'available')

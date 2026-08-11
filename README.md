@@ -676,16 +676,50 @@ proves nothing, since loopback answers either way.
 
 ## Linking to a view
 
-The tab, the sidebar's search and filters, the health kind filter and the graph's
-three filters are in the query string, so a view survives a reload — which in
-container mode is the normal way to pick up a changed config — and can be sent to
-someone with the same config:
+The tab, the sidebar's search and filters, the health kind filter, the graph's
+three filters **and the open preset** are in the query string, so a view survives
+a reload — which in container mode is the normal way to pick up a changed config —
+and can be sent to someone with the same config:
 
 ```
 ?tab=health&health=duplicate-name
 ?q=draft&origins=user%2Csystem&inactive=1
 ?tab=graph&gkinds=machine&gvendor=1&ginactive=1
+?preset=user%2Fdefault%2Ffilament%2FStudio+ABS.json
+?tab=printer&printer=…%2FWorkshop+Cube.json&process=…%2F0.20mm+Standard.json
 ```
+
+### A link carries preset names, and that is deliberate
+
+**A preset id is its file path**, so the last two lines above put a real preset or
+printer name into a string designed to be pasted into a chat, a bug report or an
+issue. That was decided rather than defaulted, and the alternative — an opaque
+hash — was rejected for two reasons:
+
+- The link is only useful to someone who already has the same config, and to them
+  those names are already on screen.
+- The path is not one identifier among several. OrcaSlicer takes a **user preset's
+  name from its filename**
+  ([Preset.cpp:1613](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1613)),
+  so the path is the identifier the slicer itself uses. A hash would be
+  indirection over the real name that also dies the moment a file is renamed, with
+  no way to say what it had pointed at.
+
+If you are pasting a link somewhere public, that is the thing to know: it names
+files. The rest of the query string does not.
+
+### A link into a different config
+
+Three outcomes, not two, and the middle one matters:
+
+| The id names | What happens |
+| --- | --- |
+| a preset that is loaded | it opens |
+| a preset that is here and that the slicer **does not load** | it opens, labelled — a failed vendor bundle, a lost name clash, an unparseable `version`, a same-directory parent |
+| nothing at all | the id is **ignored**, the tab is kept, and the app says which id and why |
+
+The last is never silent. Showing the wrong preset, or a blank pane, is how
+someone concludes the tool is lying to them.
 
 The graph's keys are `g`-prefixed because its kind filter is **not** the sidebar's:
 one picks what to list, the other what to draw, and a shared key would make each

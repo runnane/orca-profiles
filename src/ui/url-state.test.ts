@@ -10,7 +10,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { defaultViewState, parseViewState, serialiseViewState, type ViewState } from './url-state';
+import { buildIndex } from '../domain/index-config';
+import { loadConfigDir } from '../domain/load-fixtures';
+import { defaultViewState, parseViewState, serialiseViewState, type ViewState, resolveId, unknownIds } from './url-state';
 
 /** Parse what we serialised: what a link does, in one step. */
 const roundTrip = (view: ViewState) => parseViewState(serialiseViewState(view));
@@ -114,6 +116,11 @@ describe('view state in the URL', () => {
       graphKinds: new Set(['filament', 'process']),
       graphSystemOnly: true,
       graphInactive: true,
+      selected: 'user/default/filament/Studio ABS.json',
+      compareA: 'user/default/process/Fast Draft.json',
+      compareB: 'user/default/process/Loop A.json',
+      printer: 'user/default/machine/Workshop Cube.json',
+      process: 'system/Acme/process/0.20mm Standard @Acme.json',
     };
     expect(roundTrip(view)).toEqual(view);
   });
@@ -166,5 +173,86 @@ describe('view state in the URL', () => {
   it('ignores keys it does not know', () => {
     expect(parseViewState('?tab=graph&selected=some/path.json&nope=1').tab).toBe('graph');
     expect(serialiseViewState(parseViewState('?tab=graph&nope=1'))).toBe('?tab=graph');
+  });
+});
+
+
+describe('the preset ids in the URL', () => {
+  // ORCA-16, decided: the path goes in, documented. These are the keys that can
+  // name something this config does not have, which is what makes them different
+  // from every other key in the URL.
+  const FIXTURE = new URL('../../fixtures/config', import.meta.url).pathname;
+  const index = buildIndex(loadConfigDir(FIXTURE));
+
+  it('round-trips each group on its own, not just all at once', () => {
+    // A test per group, as the epic asked — one test over all five would pass with
+    // four of the keys silently dropped.
+    const groups = [
+      { selected: 'user/default/filament/Studio ABS.json' },
+      {
+        compareA: 'user/default/process/Fast Draft.json',
+        compareB: 'user/default/process/Loop A.json',
+      },
+      { printer: 'user/default/machine/Workshop Cube.json' },
+      { process: 'system/Acme/process/0.20mm Standard @Acme.json' },
+    ];
+    for (const group of groups) {
+      const view = { ...defaultViewState(), ...group };
+      expect(parseViewState(serialiseViewState(view))).toEqual(view);
+    }
+  });
+
+  it('keeps a bare URL bare', () => {
+    // The ids are only written when set, so a fresh app has no query string and a
+    // link says exactly what it means.
+    expect(serialiseViewState(defaultViewState())).toBe('');
+  });
+
+  it('puts the path in the URL, which is the decision', () => {
+    // Pinned rather than assumed: this is the thing that was decided, and a later
+    // change to hashing would be a decision reversal rather than a refactor.
+    const search = serialiseViewState({
+      ...defaultViewState(),
+      printer: 'user/default/machine/Workshop Cube.json',
+    });
+    // `+` for space is what `URLSearchParams` writes, and what it reads back — the
+    // round-trip above proves the decode. Asserted in the encoded form because
+    // that is the string a person actually copies out of the address bar.
+    expect(search).toBe('?printer=user%2Fdefault%2Fmachine%2FWorkshop+Cube.json');
+    expect(parseViewState(search).printer).toBe('user/default/machine/Workshop Cube.json');
+  });
+
+  it('resolves an id that is present and loaded', () => {
+    const r = resolveId(index, 'user/default/filament/Studio ABS.json');
+    expect(r).toMatchObject({ status: 'ok' });
+    expect(r?.preset?.name).toBe('Studio ABS');
+  });
+
+  it('distinguishes present-but-not-loaded from unknown', () => {
+    // The third outcome, and the one today's rules made common. `Loop A` names a
+    // sibling in its own directory (ORCA-22) and an Initech preset went down with
+    // its vendor's bundle (ORCA-26/27). Both are *here*; neither is loaded.
+    // Calling either "not in this config" would send someone looking for a file
+    // they are looking at.
+    expect(resolveId(index, 'user/default/process/Loop A.json')?.status).toBe('not-loaded');
+    expect(
+      resolveId(index, 'system/Initech/filament/Initech PLA @System.json')?.status,
+    ).toBe('not-loaded');
+    expect(resolveId(index, 'user/default/filament/Nope.json')?.status).toBe('unknown');
+  });
+
+  it('reports only the ids that name nothing', () => {
+    const view = {
+      ...defaultViewState(),
+      selected: 'user/default/filament/Studio ABS.json', // ok
+      compareA: 'user/default/process/Loop A.json', // not loaded, but here
+      printer: 'user/default/machine/From Another Config.json', // gone
+    };
+    expect(unknownIds(index, view)).toEqual(['user/default/machine/From Another Config.json']);
+  });
+
+  it('treats an unset id as no question at all', () => {
+    expect(resolveId(index, '')).toBeUndefined();
+    expect(unknownIds(index, defaultViewState())).toEqual([]);
   });
 });

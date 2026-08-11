@@ -3,11 +3,25 @@
  *
  * Everything the app shows was component-local `useState`, so a reload lost your
  * place and nothing could be linked to — which is most of the point of a
- * read-only explorer being a web app. This module is the layer that fixes that,
- * and it holds only the state that carries **no name read out of the config**:
- * the tab, the presets sidebar's filters, and the health kind filter. The preset
- * ids are a separate decision (ORCA-16), because a preset id is its path and a
- * link is a thing people paste into chats.
+ * read-only explorer being a web app. This module is the layer that fixes that.
+ *
+ * **It carries preset ids, and a preset id is its path** — so a link reads
+ * `?tab=printer&printer=user/default/machine/<printer name>.json` and puts a real
+ * name into a string designed to be pasted. That was ORCA-16's open question and
+ * it was decided deliberately, not by default: put the path in, and document it.
+ * Two things settled it.
+ *
+ *  - A link is only useful to someone who already has the same config, and to
+ *    them the names are already on screen.
+ *  - The path is not one identifier among several. The slicer takes a **user
+ *    preset's name from its filename** (Preset.cpp:1613-1622, ORCA-28), so the
+ *    path is the identifier OrcaSlicer itself uses. Hashing it would have been
+ *    indirection over the real name, paying a rename-fragility cost to obscure
+ *    something the reader can already see.
+ *
+ * The presets search box `q` stays for the same reason it shipped in ORCA-14: the
+ * *user* typed it and can see it in the address bar, which is a different act from
+ * the app embedding an id.
  *
  * The graph's three filters are here too (ORCA-15) and carry no name either. They
  * were sequenced behind ORCA-12 for a reason worth remembering: until that landed,
@@ -32,7 +46,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Finding } from '../domain/analyze';
-import type { PresetKind, PresetOrigin } from '../domain/types';
+import type { ConfigIndex } from '../domain/index-config';
+import type { Preset, PresetKind, PresetOrigin } from '../domain/types';
 
 export type Tab = 'presets' | 'graph' | 'printer' | 'health' | 'compare';
 
@@ -84,6 +99,19 @@ export interface ViewState {
   graphSystemOnly: boolean;
   /** Graph tab: include user folders the slicer does not load. */
   graphInactive: boolean;
+  /**
+   * The four keys that name presets, each a preset **path**. Empty means unset.
+   *
+   * Unlike everything above, one of these can name something this config does not
+   * have — a link made against a different config, or a preset since renamed. That
+   * is why `resolveIds` exists rather than each caller doing `byId.get()`: the
+   * failure has to be visible, and there are three outcomes, not two.
+   */
+  selected: string;
+  compareA: string;
+  compareB: string;
+  printer: string;
+  process: string;
 }
 
 export function defaultViewState(): ViewState {
@@ -97,16 +125,26 @@ export function defaultViewState(): ViewState {
     graphKinds: new Set(KINDS),
     graphSystemOnly: false,
     graphInactive: false,
+    selected: '',
+    compareA: '',
+    compareB: '',
+    printer: '',
+    process: '',
   };
 }
 
 /**
  * Read a URL's query string into view state.
  *
- * Unknown values fall back to the default rather than rendering nothing: none of
- * these can point at something that is missing from *this* config, so there is
- * nothing to report — a bad `tab` is a typo, not a broken link. (The preset ids
- * are the opposite case, and when they arrive they have to say so out loud.)
+ * Unknown values fall back to the default rather than rendering nothing: a bad
+ * `tab` or `health` is a typo, not a broken link, and neither can point at
+ * something missing from *this* config.
+ *
+ * **The five preset ids are the opposite case and are taken verbatim.** One of
+ * them can name a file this config does not have, and silently falling back would
+ * show the wrong preset or a blank pane to someone who followed a link. Deciding
+ * that needs the config, which this function does not have, so it does not guess —
+ * `resolveIds` does it once the index is loaded.
  */
 export function parseViewState(search: string): ViewState {
   const p = new URLSearchParams(search);
@@ -123,6 +161,13 @@ export function parseViewState(search: string): ViewState {
     graphKinds: parseSet(p.get('gkinds'), KINDS, d.graphKinds),
     graphSystemOnly: p.get('gvendor') === '1',
     graphInactive: p.get('ginactive') === '1',
+    // Taken verbatim. Whether the id names anything is a question for the config,
+    // which this module does not have — see `resolveIds`.
+    selected: p.get('preset') ?? d.selected,
+    compareA: p.get('a') ?? d.compareA,
+    compareB: p.get('b') ?? d.compareB,
+    printer: p.get('printer') ?? d.printer,
+    process: p.get('process') ?? d.process,
   };
 }
 
@@ -143,6 +188,11 @@ export function serialiseViewState(view: ViewState): string {
   }
   if (view.graphSystemOnly) p.set('gvendor', '1');
   if (view.graphInactive) p.set('ginactive', '1');
+  if (view.selected !== d.selected) p.set('preset', view.selected);
+  if (view.compareA !== d.compareA) p.set('a', view.compareA);
+  if (view.compareB !== d.compareB) p.set('b', view.compareB);
+  if (view.printer !== d.printer) p.set('printer', view.printer);
+  if (view.process !== d.process) p.set('process', view.process);
   const s = p.toString();
   return s ? `?${s}` : '';
 }
@@ -228,4 +278,49 @@ function order<T>(set: Set<T>, canonical: T[]): T[] {
 
 function sameSet<T>(a: Set<T>, b: Set<T>): boolean {
   return a.size === b.size && [...a].every((v) => b.has(v));
+}
+
+/**
+ * What a preset id in a URL actually points at, once there is a config to ask.
+ *
+ * **Three outcomes, not two**, and the third is new. A link can name:
+ *
+ *  - a preset that is there and loaded — the ordinary case;
+ *  - a preset that is there and that **OrcaSlicer does not load** — its vendor's
+ *    bundle failed (ORCA-26/27), it lost a name clash, its `version` does not
+ *    parse, or it names a sibling in its own directory (ORCA-22). The preset
+ *    resolves; showing it is right, and so is saying it is inert. Reporting this
+ *    as "unknown" would send someone looking for a file they are looking at;
+ *  - nothing at all — a link from a different config, or a since-renamed file.
+ *
+ * Only the last is a broken link, and the parent epic decided long ago how it
+ * behaves: ignore the id, keep the tab, say why on screen. Never silently show
+ * something else.
+ */
+export type IdStatus = 'ok' | 'not-loaded' | 'unknown';
+
+export interface ResolvedId {
+  /** The id as the URL gave it, so a message can quote what was asked for. */
+  id: string;
+  status: IdStatus;
+  /** Present unless `unknown`. */
+  preset?: Preset;
+}
+
+export function resolveId(index: ConfigIndex, id: string): ResolvedId | undefined {
+  if (id === '') return undefined;
+  const preset = index.byId.get(id);
+  if (!preset) return { id, status: 'unknown' };
+  // A snapshot under `_local/` is on disk and never loaded either, and is not in
+  // `notLoaded` because that map is over active presets only.
+  const inert = preset.scope !== 'active' || index.notLoaded.has(preset.id);
+  return { id, status: inert ? 'not-loaded' : 'ok', preset };
+}
+
+/** Every id in the view that named nothing, so the app can say so once. */
+export function unknownIds(index: ConfigIndex, view: ViewState): string[] {
+  return [view.selected, view.compareA, view.compareB, view.printer, view.process]
+    .map((id) => resolveId(index, id))
+    .filter((r): r is ResolvedId => r?.status === 'unknown')
+    .map((r) => r.id);
 }

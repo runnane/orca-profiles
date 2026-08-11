@@ -22,7 +22,7 @@ import { GraphView } from './GraphView';
 import { HealthReport } from './HealthReport';
 import { PresetDetail } from './PresetDetail';
 import { PrinterView } from './PrinterView';
-import { useViewState, type Tab } from './url-state';
+import { unknownIds, useViewState, type Tab } from './url-state';
 
 const KINDS: PresetKind[] = ['filament', 'process', 'machine'];
 const ORIGINS: PresetOrigin[] = ['user', 'system'];
@@ -47,10 +47,17 @@ export function App() {
   // Back should undo "I went to Health", not each chip clicked on the way there.
   const setTab = useCallback((t: Tab) => updateView({ tab: t }, { push: true }), [updateView]);
 
-  const [selectedId, setSelectedId] = useState<string>('');
-  const [compareA, setCompareA] = useState('');
-  const [compareB, setCompareB] = useState('');
-  const [printerId, setPrinterId] = useState('');
+  // The five preset ids live in the URL too (ORCA-16). Opening a preset pushes,
+  // for the same reason changing tab does: Back should close what you opened.
+  const selectedId = view.selected;
+  const setSelectedId = useCallback(
+    (id: string) => updateView({ selected: id }, { push: true }),
+    [updateView],
+  );
+  const compareA = view.compareA;
+  const compareB = view.compareB;
+  const printerId = view.printer;
+  const setPrinterId = useCallback((id: string) => updateView({ printer: id }), [updateView]);
 
   // How long the last load took, so "is it slow?" has an answer on screen
   // rather than being a matter of opinion.
@@ -72,11 +79,19 @@ export function App() {
       setIndex(built);
       setRootName(name);
       setTiming({ files: files.length, readMs, indexMs });
-      setSelectedId('');
-      if (loadedOnce.current) setTab('presets');
+      // Only on a *second* config, and this is the line a deep link depends on.
+      // Clearing unconditionally would wipe `?preset=…` between the URL being read
+      // and the config arriving — in container mode the config loads by itself, so
+      // that race is the normal path rather than an edge case. The ids are cleared
+      // with the tab for the same reason the tab is: an id from one config means
+      // nothing in another, and carrying it over would fire the "not in this
+      // config" notice about a preset the user never asked for.
+      if (loadedOnce.current) {
+        updateView({ tab: 'presets', selected: '', compareA: '', compareB: '', printer: '', process: '' });
+      }
       loadedOnce.current = true;
     },
-    [setTab],
+    [updateView],
   );
 
   const openPicker = useCallback(async () => {
@@ -167,16 +182,18 @@ export function App() {
 
   const selected = index && selectedId ? index.byId.get(selectedId) : undefined;
 
-  const showCompare = useCallback((a: string, b: string) => {
-    setCompareA(a);
-    setCompareB(b);
-    setTab('compare');
-  }, [setTab]);
+  // One update, not three: two `updateView` calls in a row would write the first
+  // to the address bar and then immediately replace it, so a Back from the compare
+  // tab would land on a half-applied state.
+  const showCompare = useCallback(
+    (a: string, b: string) => updateView({ compareA: a, compareB: b, tab: 'compare' }, { push: true }),
+    [updateView],
+  );
 
-  const showPreset = useCallback((id: string) => {
-    setSelectedId(id);
-    setTab('presets');
-  }, [setTab]);
+  const showPreset = useCallback(
+    (id: string) => updateView({ selected: id, tab: 'presets' }, { push: true }),
+    [updateView],
+  );
 
   // Keep the selection valid when filters change it out of view.
   useEffect(() => {
@@ -239,6 +256,7 @@ export function App() {
   }
 
   const s = stats(index);
+  const missingIds = unknownIds(index, view);
 
   return (
     <div className="app">
@@ -367,6 +385,25 @@ export function App() {
         )}
 
         <main className="main">
+          {/* A link that names a preset this config does not have fails **visibly**:
+              the id is ignored, the tab is kept, and this says which id and why.
+              Decided on ORCA-13 and not negotiable — silently showing the wrong
+              preset, or a blank pane, is how someone concludes the tool is lying.
+              Note this fires only for ids that name *nothing*; a preset that is
+              here and that the slicer does not load is a different answer, and the
+              detail pane already gives it. */}
+          {missingIds.length > 0 && (
+            <div className="notice" style={{ borderColor: 'var(--danger)' }}>
+              <strong>
+                This link names {missingIds.length === 1 ? 'a preset' : `${missingIds.length} presets`} that
+                {missingIds.length === 1 ? ' is' : ' are'} not in this config
+              </strong>{' '}
+              — {missingIds.map((id) => <code key={id}>{id}</code>).reduce((a, b) => <>{a}, {b}</>)}.{' '}
+              {missingIds.length === 1 ? 'It has' : 'They have'} been ignored. A preset id is its
+              file path, so a link only works against the config it was made from.
+            </div>
+          )}
+
           {tab === 'presets' &&
             (selected ? (
               <PresetDetail
@@ -406,7 +443,9 @@ export function App() {
             <PrinterView
               index={index}
               machineId={printerId}
+              processId={view.process}
               onPickMachine={setPrinterId}
+              onPickProcess={(id) => updateView({ process: id })}
               onSelect={showPreset}
             />
           )}
@@ -426,10 +465,7 @@ export function App() {
               index={index}
               aId={compareA}
               bId={compareB}
-              onPick={(a, b) => {
-                setCompareA(a);
-                setCompareB(b);
-              }}
+              onPick={(a, b) => updateView({ compareA: a, compareB: b })}
             />
           )}
         </main>
