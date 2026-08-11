@@ -60,13 +60,16 @@ describe('index', () => {
     const s = stats(index);
     expect(s.user).toBeGreaterThan(5);
     expect(s.system).toBeGreaterThan(5);
-    // Acme, Globex, Initech, and OrcaFilamentLibrary — which is a vendor bundle
-    // like any other, and is counted as one.
-    expect(s.vendors).toBe(4);
+    // Acme, Globex, Initech, Hooli, Vandelay, Bluth, and OrcaFilamentLibrary —
+    // which is a vendor bundle like any other, and is counted as one.
+    expect(s.vendors).toBe(7);
     expect(index.vendors).toContain('OrcaFilamentLibrary');
     // `vendors` is what is on disk; `failedVendors` is the subset the slicer
     // never ends up holding, and the two are deliberately different numbers.
-    expect(s.failedVendors).toEqual(['Initech']);
+    // Four of the seven fail, and each fails a different way — see the
+    // bundle-guard suite. `vendors` is what is on disk; this is the subset the
+    // slicer never ends up holding.
+    expect(s.failedVendors).toEqual(['Bluth', 'Hooli', 'Initech', 'Vandelay']);
   });
 
   it('loads only the profile named by preset_folder', () => {
@@ -378,22 +381,26 @@ describe('dangling references', () => {
 
   it('reports a vendor index entry whose file is not there', () => {
     const f = refs.find((x) => x.reference?.key === 'filament_list');
-    expect(f?.title).toContain('Globex TPU @System');
-    expect(f?.paths).toContain('system/Globex.json');
+    expect(f?.title).toContain('Vandelay TPU @System');
+    expect(f?.paths).toContain('system/Vandelay.json');
     expect(f?.presetIds).toEqual([]);
   });
 
   it('treats a missing printer model file as the more serious fault', () => {
     const f = refs.find((x) => x.reference?.key === 'machine_model_list');
     expect(f?.severity).toBe('high');
-    expect(f?.title).toContain('Globex Slab');
-    // Not "an untidy index": every preset of that model is rejected on load.
-    expect(f?.detail).toContain('4819');
+    expect(f?.title).toContain('Hooli Slab');
+    // Not "an untidy index", and no longer merely "every preset of that model is
+    // rejected": the model files are read before any preset, with no existence
+    // check and a catch that rethrows, so the whole vendor goes (ORCA-27).
+    expect(f?.detail).toContain("Hooli's entire bundle");
+    expect(f?.detail).toContain('PresetBundle.cpp:4714-4821');
   });
 
   it('flags a system printer preset naming a model its vendor does not declare', () => {
+    // Bluth declares "Bluth Banana" and its printer names "Bluth Stair Car".
     const f = refs.find((x) => x.reference?.key === 'printer_model');
-    expect(f?.title).toContain('Globex Box 0.4 nozzle');
+    expect(f?.title).toContain('Bluth Stair Car 0.4 nozzle');
     expect(f?.severity).toBe('high');
   });
 
@@ -556,8 +563,8 @@ describe('vendor index', () => {
 
   it('records whether each index entry has a file behind it', () => {
     const missing = index.vendorRefs.filter((r) => !r.present).map((r) => r.name);
-    expect(missing).toContain('Globex TPU @System');
-    expect(missing).toContain('Globex Slab');
+    expect(missing).toContain('Vandelay TPU @System');
+    expect(missing).toContain('Hooli Slab');
     expect(index.vendorRefs.filter((r) => r.name === 'fdm_filament_common')[0].present).toBe(true);
   });
 });
@@ -2070,7 +2077,7 @@ describe('a vendor inherits inside its own bundle', () => {
   });
 
   it('names the owning vendor, and says the whole bundle fails', () => {
-    const f = findings.filter((x) => x.id.startsWith('cross-vendor-inherits:'));
+    const f = findings.filter((x) => x.id === 'bundle-failed:Initech');
     expect(f).toHaveLength(1);
     expect(f[0].severity).toBe('high');
     expect(f[0].title).toContain('Initech');
@@ -2088,9 +2095,12 @@ describe('a vendor inherits inside its own bundle', () => {
       { path: 'system/Globex/filament/x.json', text: JSON.stringify({ name: 'X', inherits: 'acme_base' }) },
       { path: 'system/Globex/filament/y.json', text: JSON.stringify({ name: 'Y', inherits: 'acme_base' }) },
     ]);
-    const f = analyze(built).filter((x) => x.id.startsWith('cross-vendor-inherits:'));
+    // One finding, naming one violating preset — not two findings, and not a list
+    // of every preset the vendor happens to ship. The failure is per bundle.
+    const f = analyze(built).filter((x) => x.id.startsWith('bundle-failed:'));
     expect(f).toHaveLength(1);
-    expect(f[0].presetIds).toHaveLength(2);
+    expect(f[0].id).toBe('bundle-failed:Globex');
+    expect(f[0].presetIds).toHaveLength(1);
   });
 
   it('does not let a non-filament reach the library', () => {
@@ -2171,8 +2181,10 @@ describe('a vendor inherits inside its own bundle', () => {
     // the library cannot supply a machine base. A base never enters a collection
     // (PresetBundle.cpp:4929), so this is not a duplicate name.
     const both = index.active.filter((p) => p.name === 'fdm_machine_common');
-    expect(both).toHaveLength(3);
-    expect(new Set(both.map((p) => p.vendor))).toEqual(new Set(['Acme', 'Globex', 'Initech']));
+    expect(both).toHaveLength(4);
+    expect(new Set(both.map((p) => p.vendor))).toEqual(
+      new Set(['Acme', 'Globex', 'Initech', 'Bluth']),
+    );
     expect(findings.filter((f) => f.kind === 'duplicate-name' && f.title.includes('fdm_machine_common'))).toEqual([]);
   });
 
@@ -2220,9 +2232,22 @@ describe('a failed vendor bundle takes everything the vendor ships', () => {
     // The parallel loads are independent (PresetBundle.cpp:2250-2265), so one bad
     // bundle must not take a good one with it. This is the guard against the
     // change quietly emptying a healthy config.
-    expect([...index.failedVendors.keys()]).toEqual(['Initech']);
+    // Four vendors fail, each tripping a different guard, and each is reported as
+    // the guard that actually fired first rather than a generic "bad bundle".
+    expect(
+      Object.fromEntries([...index.failedVendors].map(([v, f]) => [v, f.guard])),
+    ).toEqual({
+      Initech: 'inherits',
+      Hooli: 'model-file-missing',
+      Vandelay: 'preset-file-missing',
+      Bluth: 'printer-model-undeclared',
+    });
+    // …and the three healthy vendors are untouched, which is the guard against
+    // this change quietly emptying a config.
+    const healthy = ['Acme', 'Globex', 'OrcaFilamentLibrary'];
+    for (const v of healthy) expect(index.failedVendors.has(v)).toBe(false);
     for (const p of index.active) {
-      if (p.vendor === 'Initech') continue;
+      if (!p.vendor || !healthy.includes(p.vendor)) continue;
       expect(failure(p.id)?.reason).not.toBe('bundle-failed');
     }
     // And Acme, whose base was the one reached for, still resolves it itself.
@@ -2235,7 +2260,10 @@ describe('a failed vendor bundle takes everything the vendor ships', () => {
   it('does not count them as loaded', () => {
     const s = stats(index);
     expect(s.notLoaded).toBeGreaterThanOrEqual(initech.length);
-    expect(s.failedVendors).toEqual(['Initech']);
+    // Four of the seven fail, and each fails a different way — see the
+    // bundle-guard suite. `vendors` is what is on disk; this is the subset the
+    // slicer never ends up holding.
+    expect(s.failedVendors).toEqual(['Bluth', 'Hooli', 'Initech', 'Vandelay']);
     // The count has to be the loaded set, not the on-disk set: the badge reading
     // higher than the slicer's is the symptom this issue is about. `bases` is the
     // other subtraction (ORCA-9) and the two have to compose, not overlap.
@@ -2270,10 +2298,12 @@ describe('a failed vendor bundle takes everything the vendor ships', () => {
   });
 
   it('says in the finding what actually disappears', () => {
-    const f = findings.find((x) => x.id === 'cross-vendor-inherits:Initech')!;
+    const f = findings.find((x) => x.id === 'bundle-failed:Initech')!;
     expect(f.detail).toContain("Initech's entire bundle");
     expect(f.detail).toContain('printer model');
-    expect(f.detail).toContain('PresetBundle.cpp:4824');
+    // Abbreviated after the file is named once earlier in the same sentence.
+    expect(f.detail).toContain('(:4824)');
+    expect(f.detail).toContain('(:2422)');
   });
 
   it('cascades into a user preset that inherits from the dropped vendor', () => {
@@ -2395,13 +2425,14 @@ describe('the printer_model / printer_variant guards read the chain', () => {
   });
 
   it('still flags a preset whose resolved model the vendor never declares', () => {
-    // The control in the other direction: the check must still fire. Globex's
-    // `Globex Box 0.4 nozzle` states a `printer_model` its own vendor index has no
-    // entry for, so nothing about reading the chain rescues it.
-    const box = byFile('system/Globex/machine/Globex Box 0.4 nozzle.json');
-    const f = findings.find((x) => x.id === `printer-model:${box.id}`);
+    // The control in the other direction: reading the chain must not rescue a
+    // preset that is genuinely wrong. Bluth's `Bluth Stair Car 0.4 nozzle` states
+    // a `printer_model` its own vendor index has no entry for.
+    const f = findings.find((x) => x.id === 'bundle-failed:Bluth');
     expect(f).toBeDefined();
     expect(f?.severity).toBe('high');
+    expect(f?.title).toContain('Bluth Stair Car 0.4 nozzle');
+    expect(f?.reference?.key).toBe('printer_model');
   });
 
   it('says the whole bundle fails, not that one preset is ignored', () => {
@@ -2410,11 +2441,10 @@ describe('the printer_model / printer_variant guards read the chain', () => {
     // vendor (PresetBundle.cpp:5161-5167) whose bundle is then never merged
     // (:2271-2283). Quoting the slicer's own misleading sentence as the consequence
     // understated it by a whole bundle.
-    const box = byFile('system/Globex/machine/Globex Box 0.4 nozzle.json');
-    const f = findings.find((x) => x.id === `printer-model:${box.id}`)!;
-    expect(f.detail).toContain("Globex's entire bundle");
-    expect(f.detail).toContain('PresetBundle.cpp:5161-5167');
-    expect(f.detail).toContain('The log line understates it');
+    const f = findings.find((x) => x.id === 'bundle-failed:Bluth')!;
+    expect(f.detail).toContain("Bluth's entire bundle");
+    expect(f.detail).toContain('PresetBundle.cpp:5123-5129');
+    expect(f.detail).toContain('understates it by a whole bundle');
   });
 
   it('reports no printer_variant finding anywhere in the fixture', () => {
@@ -2683,6 +2713,226 @@ describe('the alias a library exclusion joins on is derived, not stated', () => 
   });
 });
 
+describe('every parse_subfile guard costs the whole vendor bundle', () => {
+  // ORCA-27. `parse_subfile` returns a reason in more than one place, and each of
+  // the three per-type loops turns a reason into `throw ConfigurationError`
+  // (PresetBundle.cpp:5123-5129, :5141-5147, :5161-5167). The vendor is loaded into
+  // a temporary `PresetBundle` (:2253) merged only when nothing threw
+  // (:2271-2283), so every one of them costs the vendor rather than the preset.
+  //
+  // Four are demonstrated end to end in the fixture, one vendor each, because each
+  // needed a home that could afford to die. The two "empty" printer guards are
+  // synthetic here: a fixture vendor for each would be four more dead vendors for
+  // no extra coverage.
+  const vendorOf = (built: ConfigIndex, v: string) => built.failedVendors.get(v)?.guard;
+
+  it('reports each fixture vendor under the guard that actually fired', () => {
+    expect(
+      Object.fromEntries([...index.failedVendors].map(([v, f]) => [v, f.guard])),
+    ).toEqual({
+      Initech: 'inherits',
+      Hooli: 'model-file-missing',
+      Vandelay: 'preset-file-missing',
+      Bluth: 'printer-model-undeclared',
+    });
+  });
+
+  it('loses everything a vendor ships when a listed preset file is absent', () => {
+    // Vandelay's `Vandelay PLA @System` is correct in every respect and absent
+    // from the slicer anyway, because a *sibling* entry in the same list has no
+    // file. `load_from_json` catches every failure to read and sets a reason
+    // (Config.cpp:278-291), which `parse_subfile` returns at :4861-4866.
+    const ok = byFile('system/Vandelay/filament/Vandelay PLA @System.json');
+    expect(index.notLoaded.get(ok.id)).toMatchObject({
+      reason: 'bundle-failed',
+      vendor: 'Vandelay',
+    });
+  });
+
+  it('fires the printer guards off the chain, not off the file', () => {
+    // Composes with ORCA-19: the guard runs after `config.apply(config_src)`
+    // (:4926-4927). A preset that inherits a *valid* model must not trip it…
+    const built = buildIndex([
+      {
+        path: 'system/Acme.json',
+        text: JSON.stringify({
+          name: 'Acme',
+          machine_model_list: [{ name: 'Cube', sub_path: 'machine/Cube.json' }],
+          machine_list: [],
+          filament_list: [],
+          process_list: [],
+        }),
+      },
+      {
+        path: 'system/Acme/machine/Cube.json',
+        text: JSON.stringify({ name: 'Cube', nozzle_diameter: '0.4' }),
+      },
+      {
+        path: 'system/Acme/machine/base.json',
+        text: JSON.stringify({
+          name: 'acme_base',
+          instantiation: 'false',
+          printer_model: 'Cube',
+          printer_variant: '0.4',
+        }),
+      },
+      {
+        path: 'system/Acme/machine/p.json',
+        text: JSON.stringify({ name: 'Cube Fast', instantiation: 'true', inherits: 'acme_base' }),
+      },
+    ]);
+    expect(built.failedVendors.size).toBe(0);
+  });
+
+  it('fails the bundle when nothing in the chain sets printer_model', () => {
+    const built = buildIndex([
+      {
+        path: 'system/Acme.json',
+        text: JSON.stringify({
+          name: 'Acme',
+          machine_model_list: [{ name: 'Cube', sub_path: 'machine/Cube.json' }],
+          machine_list: [],
+          filament_list: [],
+          process_list: [],
+        }),
+      },
+      {
+        path: 'system/Acme/machine/Cube.json',
+        text: JSON.stringify({ name: 'Cube', nozzle_diameter: '0.4' }),
+      },
+      {
+        path: 'system/Acme/machine/p.json',
+        text: JSON.stringify({ name: 'Nameless', instantiation: 'true' }),
+      },
+    ]);
+    expect(vendorOf(built, 'Acme')).toBe('printer-model-empty');
+  });
+
+  it('fails the bundle when nothing in the chain sets printer_variant', () => {
+    const built = buildIndex([
+      {
+        path: 'system/Acme.json',
+        text: JSON.stringify({
+          name: 'Acme',
+          machine_model_list: [{ name: 'Cube', sub_path: 'machine/Cube.json' }],
+          machine_list: [],
+          filament_list: [],
+          process_list: [],
+        }),
+      },
+      {
+        path: 'system/Acme/machine/Cube.json',
+        text: JSON.stringify({ name: 'Cube', nozzle_diameter: '0.4' }),
+      },
+      {
+        path: 'system/Acme/machine/p.json',
+        text: JSON.stringify({ name: 'Cube ?', instantiation: 'true', printer_model: 'Cube' }),
+      },
+    ]);
+    expect(vendorOf(built, 'Acme')).toBe('printer-variant-empty');
+  });
+
+  it('fails the bundle for a variant the model file does not list', () => {
+    const built = buildIndex([
+      {
+        path: 'system/Acme.json',
+        text: JSON.stringify({
+          name: 'Acme',
+          machine_model_list: [{ name: 'Cube', sub_path: 'machine/Cube.json' }],
+          machine_list: [],
+          filament_list: [],
+          process_list: [],
+        }),
+      },
+      {
+        path: 'system/Acme/machine/Cube.json',
+        text: JSON.stringify({ name: 'Cube', nozzle_diameter: '0.4;0.6' }),
+      },
+      {
+        path: 'system/Acme/machine/p.json',
+        text: JSON.stringify({
+          name: 'Cube 0.8',
+          instantiation: 'true',
+          printer_model: 'Cube',
+          printer_variant: '0.8',
+        }),
+      },
+    ]);
+    expect(vendorOf(built, 'Acme')).toBe('printer-variant-undeclared');
+  });
+
+  it('exempts a vendor base from the printer guards', () => {
+    // `instantiation: "false"` is stored in the config map and returns before the
+    // printer checks ever run (:4929-4941), so `fdm_machine_common` having no
+    // `printer_model` is correct rather than fatal. Without this the rule would
+    // fail every vendor in existence.
+    const built = buildIndex([
+      {
+        path: 'system/Acme.json',
+        text: JSON.stringify({
+          name: 'Acme',
+          machine_model_list: [{ name: 'Cube', sub_path: 'machine/Cube.json' }],
+          machine_list: [],
+          filament_list: [],
+          process_list: [],
+        }),
+      },
+      {
+        path: 'system/Acme/machine/Cube.json',
+        text: JSON.stringify({ name: 'Cube', nozzle_diameter: '0.4' }),
+      },
+      {
+        path: 'system/Acme/machine/base.json',
+        text: JSON.stringify({ name: 'fdm_machine_common', instantiation: 'false' }),
+      },
+    ]);
+    expect(built.failedVendors.size).toBe(0);
+  });
+
+  it('does not judge a printer for a vendor whose model list it cannot see', () => {
+    // The conservative direction, and deliberate. A vendor with printers and no
+    // model list fails in the slicer too — `it_model == end()` for every one — but
+    // that is a config we have not fully read rather than one we have read and
+    // found wanting. Inventing a whole-vendor failure out of a partial view is the
+    // wrong way to be wrong, and every synthetic config in these tests is partial.
+    const built = buildIndex([
+      {
+        path: 'system/Acme/machine/p.json',
+        text: JSON.stringify({ name: 'Lonely', instantiation: 'true' }),
+      },
+    ]);
+    expect(built.failedVendors.size).toBe(0);
+  });
+
+  it('keeps one finding per vendor, naming the guard and what goes', () => {
+    const findings = analyze(index);
+    const bundle = findings.filter((f) => f.id.startsWith('bundle-failed:'));
+    expect(bundle).toHaveLength(4);
+    for (const f of bundle) {
+      expect(f.severity).toBe('high');
+      // Each says the bundle goes, and each points at the vendor index to edit.
+      expect(f.detail).toContain('entire bundle');
+      expect(f.paths?.[0]).toMatch(/^system\/[A-Za-z]+\.json$/);
+    }
+    // The four guards want four different sentences, not one shared one.
+    expect(new Set(bundle.map((f) => f.title)).size).toBe(4);
+    expect(new Set(bundle.map((f) => f.reference?.key))).toEqual(
+      new Set(['inherits', 'machine_model_list', 'sub_path', 'printer_model']),
+    );
+  });
+
+  it('says the log text understates it, where the log says anything', () => {
+    // Four of the guards log "it will be ignored" and the comment above them says
+    // "These presets are considered not installed" (:4970-4971). The finding used
+    // to repeat that. It now contradicts it, on purpose.
+    const f = analyze(index).find((x) => x.id === 'bundle-failed:Bluth')!;
+    expect(f.detail).toContain('understates it by a whole bundle');
+    // …and the `inherits` guard logs no such thing, so it does not claim it does.
+    const i = analyze(index).find((x) => x.id === 'bundle-failed:Initech')!;
+    expect(i.detail).not.toContain('understates it');
+  });
+});
+
 describe('the dropdown’s own grouping', () => {
   // Modelled on `PlaterPresetComboBox::update` (v2.4.2 PresetComboBoxes.cpp), so
   // that the two lists can be read side by side rather than reconciled by eye.
@@ -2834,6 +3084,7 @@ describe('vendor bases are not presets you can pick', () => {
       'Acme/fdm_machine_common',
       'Acme/fdm_process_acme_common',
       'Acme/fdm_process_common',
+      'Bluth/fdm_machine_common',
       'Globex/fdm_machine_common',
       'Initech/fdm_machine_common',
       'OrcaFilamentLibrary/fdm_filament_common',
@@ -2857,7 +3108,7 @@ describe('vendor bases are not presets you can pick', () => {
     // Seven `instantiation: "false"` files on disk, six counted: Initech's is in
     // `notLoaded`, so it is neither selectable nor a base the slicer holds.
     expect(s.bases).toBe(6);
-    expect(bases).toHaveLength(7);
+    expect(bases).toHaveLength(8);
     expect(s.system).toBe(loaded.filter((p) => p.origin === 'system' && p.instantiable).length);
     expect(s.system + s.bases + s.user + s.notLoaded).toBe(index.active.length);
     // `byKind` drives the sidebar's origin chips, so it has to agree.

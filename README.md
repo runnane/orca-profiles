@@ -198,6 +198,27 @@ before any preset is read. So one unresolvable name in one file removes the
 vendor's presets, its models, and — through rule 4's cascade — anything of yours
 that inherited from it.
 
+**And `inherits` is only one of the ways in.** `parse_subfile` returns a reason
+from several places, and every one of them reaches that same throw:
+
+| What is wrong | Where |
+| --- | --- |
+| a listed preset's file cannot be read | [:4861](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4861), via [Config.cpp:278-291](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Config.cpp#L278) |
+| a `machine_model_list` file cannot be read | [:4714-4821](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4714) |
+| `inherits` resolves to nothing | [:4913](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4913) |
+| `printer_model` empty, or not one this vendor declares | [:4973](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4973), [:4988](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4988) |
+| `printer_variant` empty, or not one that model lists | [:4981](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4981), [:4998](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4998) |
+
+**Do not trust the log here.** Four of those print `"… it will be ignored"`, and
+the comment above them says "These presets are considered not installed"
+([:4970](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4970)).
+Both describe a per-preset skip. The code aborts the vendor. The app says so, and
+says the log understates it, rather than repeating the slicer's own sentence.
+
+A missing *file* is the one to know about, because it reads as the most harmless
+thing on that list: a single `sub_path` in a vendor index pointing at nothing —
+one line of JSON — silently costs you every preset and model that vendor ships.
+
 The app marks the whole vendor as never loaded, consistently: in the counts, the
 sidebar, the graph and the printer's filament list, with one finding per vendor
 rather than one per preset. Rows are **labelled, not dropped** — a vendor
