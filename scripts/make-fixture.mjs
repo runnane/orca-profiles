@@ -59,10 +59,45 @@ rmSync(ROOT, { recursive: true, force: true });
 // Two vendors. The base names mirror OrcaSlicer's own (`fdm_*`), which are
 // public product data rather than anything personal.
 
+// ─── the filament library ──────────────────────────────────────────────────
+// The one vendor every other vendor's *filaments* may inherit from. It is loaded
+// first and synchronously, into the bundle the parallel vendor loads then get as
+// their `base_bundle` (PresetBundle.cpp:2216-2245, :2231-2241), which is the only
+// route by which an `inherits` crosses a vendor boundary at all.
+//
+// Two limits worth knowing, both from where the assignment sits in the loader:
+//
+//  - `m_config_maps` is set immediately after the **filament** loop and the maps
+//    are cleared per preset type (PresetBundle.cpp:5133-5153), so the library can
+//    supply a filament base and nothing else. A machine base has to be per-vendor.
+//  - the library is loaded with no `base_bundle` of its own, so its presets can
+//    only inherit within it.
+//
+// `fdm_filament_common` lives here rather than in Acme, which is the correction
+// ORCA-10 is about: the fixture used to have Globex inheriting *Acme's* copy, a
+// chain the slicer refuses to load.
+write('system/OrcaFilamentLibrary/filament/fdm_filament_common.json', {
+  name: 'fdm_filament_common',
+  instantiation: 'false',
+  ...bulkSettings(1),
+  nozzle_temperature: '200',
+  filament_flow_ratio: '0.98',
+});
+write('system/OrcaFilamentLibrary.json', {
+  name: 'OrcaFilamentLibrary',
+  version: '01.00.00.00',
+  description: 'Shared filament bases',
+  machine_model_list: [],
+  filament_list: [{ name: 'fdm_filament_common', sub_path: 'filament/fdm_filament_common.json' }],
+  process_list: [],
+  machine_list: [],
+});
+
 const acmeFilaments = [
   // Claimed by Globex too — see the note there.
   ['Shared PLA @System', { name: 'Shared PLA @System', inherits: 'fdm_filament_common', nozzle_temperature: '208' }],
-  ['fdm_filament_common', { name: 'fdm_filament_common', instantiation: 'false', ...bulkSettings(1), nozzle_temperature: '200', filament_flow_ratio: '0.98' }],
+  // Acme's own ABS base, deliberately *not* in the library: it is what the
+  // cross-vendor violation below reaches for, and it has to be unreachable.
   ['fdm_filament_abs', { name: 'fdm_filament_abs', instantiation: 'false', inherits: 'fdm_filament_common', nozzle_temperature: '250', hot_plate_temp: '90' }],
   // `filament_vendor` and `filament_type` are what the dropdown sub-groups and
   // orders system presets by (PresetComboBoxes.cpp:1222, :1330-1350). Stated on
@@ -193,12 +228,35 @@ const globexFilaments = [
   // Deliberately *not* an `fdm_*` base: a base never enters a collection, so two
   // vendors shipping one is not a clash at all.
   ['Shared PLA @System', { name: 'Shared PLA @System', inherits: 'fdm_filament_common', nozzle_temperature: '205' }],
+  // **A cross-vendor inherit, written on purpose.** `fdm_filament_abs` is Acme's
+  // and is not in the library, so Globex's bundle cannot see it: `parse_subfile`
+  // looks in its own per-vendor `config_maps` and then in the library's, finds
+  // neither, and returns "Can not find inherits" (PresetBundle.cpp:4889-4916) —
+  // which the caller turns into a `ConfigurationError` for the whole Globex bundle
+  // (:5133-5147). The name exists in the config and is still unreachable, which is
+  // the case a name-matching resolver gets wrong in the confident direction.
+  ['Globex ABS @System', { name: 'Globex ABS @System', inherits: 'fdm_filament_abs', nozzle_temperature: '248' }],
 ];
 for (const [, p] of globexFilaments) write(`system/Globex/filament/${p.name}.json`, p);
+
+// Globex's own machine base. Every real vendor ships its own `fdm_*` set, and it
+// has to: the library can only supply a *filament* base, because its config maps
+// are handed over right after the filament loop (PresetBundle.cpp:5147-5151).
+//
+// Two vendors shipping one `fdm_machine_common` is also the guard on the clash
+// rule — a base never enters a collection (PresetBundle.cpp:4929), so this is not
+// a duplicate name and must not be reported as one.
+write('system/Globex/machine/fdm_machine_common.json', {
+  name: 'fdm_machine_common',
+  instantiation: 'false',
+  ...bulkSettings(41),
+  printable_height: '210',
+});
 
 // A vendor printer preset naming a model this vendor never declares: Globex has
 // no `machine_model_list` entry for "Globex Box", so the slicer drops the preset
 // on load rather than showing it (PresetBundle.cpp:4988). Written on purpose.
+// Its `inherits` is Globex's own base, so this preset carries that one fault only.
 write('system/Globex/machine/Globex Box 0.4 nozzle.json', {
   name: 'Globex Box 0.4 nozzle',
   instantiation: 'true',
@@ -223,7 +281,10 @@ write('system/Globex.json', {
     { name: 'Globex TPU @System', sub_path: 'filament/Globex TPU @System.json' },
   ],
   process_list: [],
-  machine_list: [{ name: 'Globex Box 0.4 nozzle', sub_path: 'machine/Globex Box 0.4 nozzle.json' }],
+  machine_list: [
+    { name: 'fdm_machine_common', sub_path: 'machine/fdm_machine_common.json' },
+    { name: 'Globex Box 0.4 nozzle', sub_path: 'machine/Globex Box 0.4 nozzle.json' },
+  ],
 });
 
 // ─── the live user profile ─────────────────────────────────────────────────

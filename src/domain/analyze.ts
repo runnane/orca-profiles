@@ -43,6 +43,7 @@ import { diffEffective } from './diff';
 import {
   classifyReference,
   clashGroups,
+  FILAMENT_LIBRARY_VENDOR,
   loadOrder,
   notLoadedIds,
   tieIsArbitrary,
@@ -191,7 +192,7 @@ export function analyze(index: ConfigIndex): Finding[] {
     }
 
     if (missingParent) {
-      const r = classifyReference(index, p, p.kind, missingParent);
+      const r = classifyReference(index, p, p.kind, missingParent, 'inherits');
       const near = r.others[0];
       findings.push({
         id: `broken:${p.id}`,
@@ -250,6 +251,7 @@ export function analyze(index: ConfigIndex): Finding[] {
 
   findings.push(...referenceFindings(index, userPresets, shadowed, label));
   findings.push(...vendorIndexFindings(index));
+  findings.push(...crossVendorInheritFindings(index));
 
   // A name has to be unique inside the scope the slicer keeps it in — one user
   // profile, or every vendor at once. `clashScope` is that rule; across *profiles*
@@ -351,6 +353,15 @@ function reasonClause(
       return `a preset named "${name}" does exist, at ${near?.path ?? 'another user folder'} — in \`user/${near?.profile ?? '?'}\`, which OrcaSlicer does not load. Only one user folder is ever loaded (PresetBundle.cpp:528), so that file can never satisfy this reference and editing it changes nothing`;
     case 'wrong-kind':
       return `the only preset named "${name}" is a ${near?.kind ?? 'different'} preset. A name is resolved inside a single \`PresetCollection\`, which holds one preset type (\`find_preset2\`, Preset.cpp:3229), so a ${near?.kind ?? 'different'} preset cannot answer this`;
+    case 'other-vendor':
+      // The name exists, in the config, spelled right, and is still unreachable.
+      // Worth its own wording because the fix is neither "install it" nor "rename
+      // it" — the parent has to be moved, or duplicated into this vendor.
+      return `"${name}" belongs to ${near?.vendor ?? 'another vendor'}, and a vendor's \`inherits\` is resolved against its **own** bundle plus \`${FILAMENT_LIBRARY_VENDOR}\` and nothing else — "The remaining vendors are independent (no cross-vendor inheritance)" (PresetBundle.cpp:2216-2219). ${
+        near?.kind === 'filament'
+          ? `Only ${FILAMENT_LIBRARY_VENDOR} is shared, so moving this base there would make it reachable`
+          : `The shared bundle carries filament bases only — its config maps are handed over right after the filament loop (PresetBundle.cpp:5147-5151) — so a ${near?.kind ?? 'non-filament'} base cannot be shared at all and this vendor needs its own copy`
+      }`;
     case 'absent':
       return `no preset by that name is installed`;
     // A reference that resolves is not a finding; `shadowed` resolves too, and
@@ -575,6 +586,68 @@ function vendorIndexFindings(index: ConfigIndex): Finding[] {
         weight: 860,
       });
     }
+  }
+
+  return out;
+}
+
+/**
+ * A vendor preset whose `inherits` reaches outside its own bundle.
+ *
+ * The only reference check that runs over **system** presets, and it is here rather
+ * than folded into `broken-parent` because the consequence is a different size:
+ * `parse_subfile` returns `"Can not find inherits"` (PresetBundle.cpp:4913-4916) and
+ * the caller raises a `ConfigurationError` for that vendor's **whole bundle**
+ * (:5121-5130). So this is not one preset going missing, it is every preset the
+ * vendor ships.
+ *
+ * Only `other-vendor` is reported. A vendor base naming something genuinely absent
+ * is a broken install rather than a modelling question, and `vendorIndexFindings`
+ * already covers the index side of that.
+ */
+function crossVendorInheritFindings(index: ConfigIndex): Finding[] {
+  const out: Finding[] = [];
+  // Grouped by vendor: the failure is per bundle, so N presets in one vendor
+  // reaching outside it is one thing to fix, not N findings saying the same.
+  const byVendor = new Map<string, { preset: Preset; parent: Preset; name: string }[]>();
+
+  for (const p of index.active) {
+    if (p.origin !== 'system' || !p.inherits || !p.vendor) continue;
+    const r = classifyReference(index, p, p.kind, p.inherits, 'inherits');
+    if (r.reason !== 'other-vendor') continue;
+    const parent = r.others[0];
+    if (!parent) continue;
+    byVendor.set(p.vendor, [...(byVendor.get(p.vendor) ?? []), { preset: p, parent, name: p.inherits }]);
+  }
+
+  for (const [vendor, hits] of byVendor) {
+    const owners = [...new Set(hits.map((h) => h.parent.vendor ?? '?'))].sort();
+    const first = hits[0];
+    out.push({
+      id: `cross-vendor-inherits:${vendor}`,
+      severity: 'high',
+      kind: 'missing-reference',
+      title:
+        hits.length === 1
+          ? `${vendor}'s "${first.preset.name}" inherits from ${owners.join(' and ')}, which its bundle cannot see`
+          : `${hits.length} ${vendor} presets inherit from ${owners.join(' and ')}, which its bundle cannot see`,
+      detail: `${hits
+        .slice(0, 4)
+        .map((h) => `\`${h.preset.name}\` names "${h.name}"`)
+        .join(', ')}${hits.length > 4 ? ', …' : ''}. Each vendor is loaded into its own bundle and resolves \`inherits\` against that bundle plus \`${FILAMENT_LIBRARY_VENDOR}\` only — "The remaining vendors are independent (no cross-vendor inheritance)" (PresetBundle.cpp:2216-2219). A name it cannot find is not a preset with an odd parent: \`parse_subfile\` returns "Can not find inherits" (PresetBundle.cpp:4913-4916) and the caller raises a \`ConfigurationError\` for **${vendor}'s entire bundle** (PresetBundle.cpp:5121-5130), so every preset this vendor ships is absent from the slicer, not just ${hits.length === 1 ? 'this one' : 'these'}.`,
+      presetIds: hits.map((h) => h.preset.id),
+      paths: [`system/${vendor}.json`],
+      reference: {
+        key: 'inherits',
+        targetKind: first.preset.kind,
+        unresolved: hits.map((h) => ({
+          name: h.name,
+          reason: 'other-vendor' as const,
+          targetPath: h.parent.path,
+        })),
+      },
+      weight: 985,
+    });
   }
 
   return out;
