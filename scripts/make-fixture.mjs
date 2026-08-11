@@ -468,9 +468,17 @@ writeUser('user/default/process/Studio Base.json', {
 });
 
 // A hand-edited loop: two presets inheriting each other. Nothing the slicer
-// writes, everything a text editor can produce — and the reason resolution has a
-// cycle guard at all. The graph has to draw the closing edge rather than follow
-// it.
+// writes, everything a text editor can produce.
+//
+// **And the slicer never sees it as a loop**, which is the point of keeping it.
+// Both files are in the same directory, so each is loaded in the same pass as the
+// one it names and neither lookup can find the other (Preset.cpp:1609, :1764-1765,
+// :3211-3213). Both are skipped with "can not find parent", separately.
+//
+// That generalises: every user `inherits` edge must run from a later pass to an
+// earlier one — `<kind>/` to `<kind>/base/` — so **a user-to-user loop cannot
+// exist**. The cycle guard in `resolve` stays anyway; it protects our own walk,
+// which is a different job from describing a config.
 writeUser('user/default/process/Loop A.json', {
   name: 'Loop A',
   from: 'User',
@@ -640,6 +648,27 @@ writeUser('user/default/machine/Bench Rig C.json', {
   inherits: 'Bench Rig Base OK',
   printable_height: '260', // identical to the parent -> redundant, and reported
   nozzle_diameter: '0.4',
+});
+
+// One `base/` preset inheriting another. `base/` is a single completed pass of
+// its own (`load_presets(dir, "base", …)`, Preset.cpp:1583-1586), so these two are
+// loaded together and neither can see the other — the same rule that stops a
+// folder sibling resolving, one directory down. Written on purpose because it is
+// the case that *looks* like it should work: `base/` is "loaded first", and the
+// intuition that follows is that everything in it is available to everything else
+// in it.
+writeUser('user/default/machine/base/Bench Rig Base Shared.json', {
+  name: 'Bench Rig Base Shared',
+  from: 'User',
+  inherits: '',
+  ...bulkSettings(53),
+  printable_height: '300',
+});
+writeUser('user/default/machine/base/Bench Rig Base Derived.json', {
+  name: 'Bench Rig Base Derived',
+  from: 'User',
+  inherits: 'Bench Rig Base Shared',
+  printable_height: '310',
 });
 
 // A `version` that is *present* and still rejected: the parser needs at least

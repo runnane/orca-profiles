@@ -87,6 +87,48 @@ That folder is then loaded **first** — `// Load custom roots first`
 name. It is not a separate namespace; it is a load-order guarantee for presets
 that other presets depend on.
 
+**And "first" means "in a separate pass", which is the part with teeth.** A
+directory is collected into a *local* deque and merged into the collection only
+after the whole directory has been walked:
+
+```cpp
+// Store the loaded presets into a new vector, otherwise the binary search for
+// already existing presets would be broken.
+std::deque<Preset> presets_loaded;
+…
+if (presets_loaded.size() > 0)
+    m_presets.insert(m_presets.end(), …);
+```
+([Preset.cpp:1609](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1609),
+[:1764](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1764))
+
+while the `inherits` lookup is a binary search over the *already merged*
+collection
+([find_preset](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L3211),
+[find_preset2](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L3229)).
+So nothing loaded in the current pass is visible to it, and there are exactly two
+user passes per preset type — `<type>/base/`, then `<type>/` — because
+`directory_iterator` does not recurse
+([Preset.cpp:1608](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1608))
+and `base/` is the only explicit recursive call.
+
+Three consequences, and the first is the one people hit:
+
+- **A user preset cannot inherit from a sibling in its own folder.** It gets
+  `can not find parent` and is skipped entirely
+  ([Preset.cpp:1686](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1686)),
+  taking its own children with it by rule 4. The fix is to move the parent into
+  `<type>/base/`. The app says exactly that rather than reporting the parent as
+  missing, because the file is right there and "not installed" would send you
+  looking for it.
+- **`base/` is subject to its own rule.** One `base/` preset inheriting another is
+  also a same-pass reference and also fails — which is the case that looks like it
+  should work, since `base/` is the folder that gets loaded first.
+- **A loop between two of your presets is impossible.** Every edge runs from a
+  later pass to an earlier one, so no chain of them can return. A hand-written
+  `A ⟷ B` is not a cycle the slicer sees; it is two files that each fail
+  separately, and the app draws it that way.
+
 ### 3. On a name clash, the loser is never loaded
 
 Not merged, not renamed — skipped, with `"Preset already present, not loading"`

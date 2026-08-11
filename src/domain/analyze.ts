@@ -362,6 +362,11 @@ function reasonClause(
           ? `Only ${FILAMENT_LIBRARY_VENDOR} is shared, so moving this base there would make it reachable`
           : `The shared bundle carries filament bases only — its config maps are handed over right after the filament loop (PresetBundle.cpp:5147-5151) — so a ${near?.kind ?? 'non-filament'} base cannot be shared at all and this vendor needs its own copy`
       }`;
+    case 'same-directory':
+      // Not "absent", and that distinction is the whole finding: the file is
+      // right there, in the folder the slicer loads, spelled correctly. What it
+      // is not is *loaded yet* at the moment the lookup runs.
+      return `"${name}" is ${near?.path ?? 'in the same folder'}, which the slicer loads in the **same pass** as this file. \`load_presets\` collects a directory into a local deque and merges it into the collection only once the whole directory has been walked (Preset.cpp:1609, :1764-1765), while the \`inherits\` lookup is a binary search over the *already merged* collection (Preset.cpp:3211-3213) — so a preset cannot inherit from a sibling in its own directory, and this one is skipped with "can not find parent" (Preset.cpp:1686-1691). Move the parent into \`${near ? `${near.path.slice(0, near.path.lastIndexOf('/'))}/base/` : 'that folder’s `base/`'}\` — which is loaded first, as a separate completed pass (Preset.cpp:1583-1586) — and the chain works`;
     case 'absent':
       return `no preset by that name is installed`;
     // A reference that resolves is not a finding; `shadowed` resolves too, and

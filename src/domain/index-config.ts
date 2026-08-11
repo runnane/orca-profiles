@@ -638,6 +638,10 @@ function firstLoadable(
  *  - `other-vendor`     **`inherits` only.** It exists, in another vendor's
  *                       bundle, which this vendor's load cannot see. See
  *                       `inheritsScope`.
+ *  - `same-directory`   **`inherits` only.** It exists, in the same directory as
+ *                       the preset naming it — so it is loaded in the *same pass*
+ *                       and is not in the collection yet when the lookup runs.
+ *                       See `inheritsScope`.
  *  - `not-loaded`       it exists, in the folder the slicer *does* load, is
  *                       reachable, and the slicer still skipped it — a `version`
  *                       that does not parse, or its own `inherits` failing. This is
@@ -651,6 +655,7 @@ export type ReferenceReason =
   | 'wrong-kind'
   | 'unloaded-profile'
   | 'other-vendor'
+  | 'same-directory'
   | 'not-loaded'
   | 'absent';
 
@@ -725,11 +730,56 @@ export function genericAlias(name: string): string | undefined {
  *  - The library itself is loaded with **no `base_bundle`** (:2231-2241), so its
  *    presets can only inherit within it.
  *
- * A **user** preset is unaffected: it inherits inside its own `PresetCollection`,
- * which holds every vendor's presets after the merge.
+ * A **user** preset is not bound by the vendor rule — it inherits inside its own
+ * `PresetCollection`, which holds every vendor's presets after the merge — but it
+ * has a boundary of its own, in a different dimension: **the directory**.
+ *
+ * `load_presets` collects into a *local* deque and merges only after the whole
+ * directory has been walked:
+ *
+ * ```cpp
+ * // Store the loaded presets into a new vector, otherwise the binary search for
+ * // already existing presets would be broken.
+ * std::deque<Preset> presets_loaded;
+ * …
+ * if (presets_loaded.size() > 0)
+ *     m_presets.insert(m_presets.end(), …);
+ * ```
+ * — v2.4.2 Preset.cpp:1609, :1764-1765
+ *
+ * and the lookup is a binary search over `m_presets` (`find_preset2` → `find_preset`
+ * → `find_preset_internal`, Preset.cpp:3211-3213, :3229). So **nothing loaded in
+ * the current pass is visible to it.** An `inherits` can only reach an *earlier*
+ * pass: the system bundles, merged before any user folder is read, or `base/`,
+ * which is a separate completed recursive call made first (Preset.cpp:1583-1586).
+ *
+ * This is the missing half of the `base/` rule we already model. `loadOrder` ranks
+ * `base/` ahead of the folder proper; the reason that ranking *works* is that
+ * "first" means "in another pass", and the same fact makes a same-pass reference
+ * impossible.
+ *
+ * There are exactly two user passes per kind, because `directory_iterator` is not
+ * recursive (Preset.cpp:1608) and the only recursion is the one explicit `base/`
+ * call: `<kind>/base/`, then `<kind>/`. And `inherits` is same-kind only, so the
+ * ordering is total — which is why this is `isCustomRoot` rather than a directory
+ * comparison. Comparing directories would let `<kind>/base/X` inherit `<kind>/Y`,
+ * a *later* pass, and a config could then describe a resolvable cycle the slicer
+ * cannot have.
+ *
+ * Which is the sharp end of this rule: **a user-to-user inheritance loop is
+ * impossible.** Every edge must go from a later pass to an earlier one, so no
+ * chain of them can come back. The `circular` guard in `resolve` stays, because
+ * it protects this code rather than describing a config.
  */
 function inheritsScope(from: Preset, candidate: Preset): boolean {
-  if (from.origin !== 'system') return true;
+  if (from.origin !== 'system') {
+    // A system candidate came from a bundle merged long before any user folder was
+    // read, so it is always reachable.
+    if (candidate.origin !== 'user') return true;
+    // Both user, and `firstLoadable` has already confined them to one profile. The
+    // only user pass that completes before another is `base/` before its folder.
+    return candidate.isCustomRoot && !from.isCustomRoot;
+  }
   if (candidate.origin !== 'system') return false;
   if (candidate.vendor === from.vendor) return true;
   return (
@@ -785,10 +835,17 @@ export function classifyReference(
     return { reason: 'unloaded-profile', others: sameKind, arbitrary: false };
   }
 
-  // In the collection, but not in a bundle this preset's load can reach. Only
-  // `inherits` narrows this far — see `inheritsScope`.
+  // In the collection, but not in a *pass* this preset's `inherits` can reach.
+  // Only `inherits` narrows this far — see `inheritsScope` — and the two ways it
+  // narrows want different sentences, so they get different reasons. Which one
+  // applies is decided by `from`, not by the candidates: a user preset is only
+  // ever filtered by the directory rule, a system one only by the bundle rule.
   if (ordered.length === 0) {
-    return { reason: 'other-vendor', others: inCollection, arbitrary: false };
+    return {
+      reason: from.origin === 'user' ? 'same-directory' : 'other-vendor',
+      others: inCollection,
+      arbitrary: false,
+    };
   }
 
   // Every claimant the slicer could have reached, and it loaded none of them. The
