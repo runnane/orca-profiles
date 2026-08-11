@@ -337,10 +337,31 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
     if (!kind) continue;
 
     const vendor = isSystem ? path.split('/')[1] : undefined;
-    const name =
-      (typeof raw.name === 'string' && raw.name) ||
-      declaredNameByPath.get(path) ||
-      path.split('/').pop()!.replace(/\.json$/, '');
+    const fileName = path.split('/').pop()!.replace(/\.json$/, '');
+    // **The precedence depends on the origin, and the two are opposite** (ORCA-28).
+    //
+    // A *user* preset is named by its **filename**. `load_presets` strips `.json`
+    // off the directory entry and never consults the `name` key at all:
+    //
+    //     std::string name = file_name.erase(file_name.size() - 5);
+    //     std::string canonical_name = this->canonical_preset_name(name, resolved_origin);
+    //     …
+    //     Preset preset(m_type, canonical_name, false);
+    //                                        — v2.4.2 Preset.cpp:1613-1622
+    //
+    // A *vendor* preset is the other way round: `parse_subfile` takes
+    // `key_values[BBL_JSON_KEY_NAME]` out of the file (PresetBundle.cpp:4867), and
+    // the vendor index's entry name is what the sub_path was found under.
+    //
+    // They agree on anything the slicer wrote — `path_from_name` derives the file
+    // name from the preset name (Preset.cpp:3869) — so this only bites a file
+    // produced some other way: hand-edited, renamed on disk, scripted, restored
+    // from a backup. Which is the same population rule 4 bites, and the population
+    // this tool exists for. Getting it wrong moves `inherits` resolution and name
+    // clashes together, since both key on the name.
+    const name = isSystem
+      ? (typeof raw.name === 'string' && raw.name) || declaredNameByPath.get(path) || fileName
+      : fileName;
 
     const origin = isSystem ? 'system' : 'user';
     const inheritsRaw = raw.inherits;

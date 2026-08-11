@@ -585,10 +585,17 @@ writeUser('user/default/process/Fast Draft.json', {
   post_process: [],
 });
 
-// A SECOND file claiming the same name, written in the other serialisation.
-// OrcaSlicer loads one of these and never loads the other.
+// A near-copy of the one above, written in the **other serialisation** — which is
+// what this shape is for: three of its keys hold the same value in a different
+// form and must not read as differences.
+//
+// It used to declare `name: "Fast Draft"` as a second claimant of that name. That
+// is a clash the slicer cannot have (ORCA-28): a user preset is named by its
+// **filename**, so two files in one directory can no more share a name than they
+// can share a path. A user name clash needs two directories — `<kind>/base/` and
+// `<kind>/` — which is what the `Studio Base` pair below is.
 writeUser('user/default/process/Fast Draft 2.json', {
-  name: 'Fast Draft', // <- same declared name, different file
+  name: 'Fast Draft 2',
   type: 'print',
   ...bulkSettings(7),
   layer_height: '0.3',
@@ -653,6 +660,35 @@ writeUser('user/default/process/Loop B.json', {
   from: 'User',
   inherits: 'Loop A',
   top_shell_thickness: '0.9',
+});
+
+// **A file whose `name` key disagrees with its filename.** The slicer names a user
+// preset by its *filename* and never reads the `name` key on that path
+// (Preset.cpp:1613-1622), so this preset is `Renamed On Disk` and there is no
+// `Old Studio Name` anywhere — which is what the two presets below are for.
+//
+// Not a shape the slicer writes: `path_from_name` derives the file name from the
+// preset name (Preset.cpp:3869), so the two always agree on anything it saved.
+// It is what a hand-edited, scripted, or renamed-in-a-file-manager config looks
+// like, which is the population this tool exists for.
+// In `base/`, because the child below has to be able to reach it: a sibling in
+// the same directory is the same load pass and never resolves (ORCA-22). The two
+// rules compose, and this shape only tests the naming one if the other is satisfied.
+writeUser('user/default/process/base/Renamed On Disk.json', {
+  name: 'Old Studio Name',
+  from: 'User',
+  inherits: '',
+  ...bulkSettings(71),
+  layer_height: '0.24',
+});
+// Resolves: it names the **file**. Reading the `name` key instead would report
+// this chain as broken — a false "missing parent", the class this repo has five
+// of on record.
+writeUser('user/default/process/Wants Renamed By File.json', {
+  name: 'Wants Renamed By File',
+  from: 'User',
+  inherits: 'Renamed On Disk',
+  layer_height: '0.25',
 });
 
 // A preset whose declared parent is not installed.
