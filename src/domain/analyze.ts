@@ -529,6 +529,10 @@ function vendorIndexFindings(index: ConfigIndex): Finding[] {
 
   for (const p of index.presets) {
     if (p.origin !== 'system' || p.kind !== 'machine' || !p.vendor) continue;
+    // Its whole bundle is gone, which `cross-vendor-inherits` already says at the
+    // vendor level. A second finding blaming this file's `printer_model` would
+    // send someone to fix a preset that is absent for a different reason.
+    if (index.notLoaded.get(p.id)?.reason === 'bundle-failed') continue;
     // A preset marked `instantiation: "false"` is a base for others to inherit,
     // not a printer you can select. It is stored and returned before the model
     // check ever runs (PresetBundle.cpp:4928), so `fdm_machine_common` having no
@@ -623,6 +627,14 @@ function crossVendorInheritFindings(index: ConfigIndex): Finding[] {
   for (const [vendor, hits] of byVendor) {
     const owners = [...new Set(hits.map((h) => h.parent.vendor ?? '?'))].sort();
     const first = hits[0];
+    // What actually disappears, so the number in the finding is the number the
+    // sidebar and the counts now show as not loaded rather than a rounder claim.
+    const lost = index.active.filter((p) => p.vendor === vendor && p.origin === 'system');
+    const lostModels = index.vendorModels.filter((m) => m.vendor === vendor);
+    const byKind = (['machine', 'filament', 'process'] as PresetKind[])
+      .map((k) => ({ k, n: lost.filter((p) => p.kind === k).length }))
+      .filter((x) => x.n > 0)
+      .map((x) => `${x.n} ${x.k}${x.n === 1 ? '' : 's'}`);
     out.push({
       id: `cross-vendor-inherits:${vendor}`,
       severity: 'high',
@@ -634,7 +646,11 @@ function crossVendorInheritFindings(index: ConfigIndex): Finding[] {
       detail: `${hits
         .slice(0, 4)
         .map((h) => `\`${h.preset.name}\` names "${h.name}"`)
-        .join(', ')}${hits.length > 4 ? ', …' : ''}. Each vendor is loaded into its own bundle and resolves \`inherits\` against that bundle plus \`${FILAMENT_LIBRARY_VENDOR}\` only — "The remaining vendors are independent (no cross-vendor inheritance)" (PresetBundle.cpp:2216-2219). A name it cannot find is not a preset with an odd parent: \`parse_subfile\` returns "Can not find inherits" (PresetBundle.cpp:4913-4916) and the caller raises a \`ConfigurationError\` for **${vendor}'s entire bundle** (PresetBundle.cpp:5121-5130), so every preset this vendor ships is absent from the slicer, not just ${hits.length === 1 ? 'this one' : 'these'}.`,
+        .join(', ')}${hits.length > 4 ? ', …' : ''}. Each vendor is loaded into its own bundle and resolves \`inherits\` against that bundle plus \`${FILAMENT_LIBRARY_VENDOR}\` only — "The remaining vendors are independent (no cross-vendor inheritance)" (PresetBundle.cpp:2216-2219). A name it cannot find is not a preset with an odd parent: \`parse_subfile\` returns "Can not find inherits" (PresetBundle.cpp:4913-4916) and the caller raises a \`ConfigurationError\` for **${vendor}'s entire bundle** (PresetBundle.cpp:5121-5130), so every preset this vendor ships is absent from the slicer, not just ${hits.length === 1 ? 'this one' : 'these'}. That is ${byKind.join(', ')}${
+        lostModels.length > 0
+          ? `, and ${lostModels.length} printer model${lostModels.length === 1 ? '' : 's'} — the models are emplaced into the same temporary bundle before any preset is read (PresetBundle.cpp:4824) and only reach the app through the merge that never happens (PresetBundle.cpp:2422)`
+          : ''
+      }. Anything of yours inheriting from ${vendor} is skipped too. Move the base into \`${FILAMENT_LIBRARY_VENDOR}\`, give ${vendor} its own copy, or uninstall ${vendor}.`,
       presetIds: hits.map((h) => h.preset.id),
       paths: [`system/${vendor}.json`],
       reference: {
@@ -703,6 +719,15 @@ export function findNearDuplicates(index: ConfigIndex, presets: Preset[]): Findi
   return out;
 }
 
+/**
+ * The headline numbers, counted the way the slicer would count them.
+ *
+ * `system`, `user` and `byKind` are **loaded** presets: a file in
+ * `index.notLoaded` is on disk and absent from the slicer, and counting it here
+ * is how a config reads as bigger than the one the slicer has. `notLoaded` is the
+ * difference, reported rather than swallowed — a vendor that vanishes with no
+ * number next to it is worse than one that is wrongly counted.
+ */
 export interface ConfigStats {
   /** Selectable vendor presets. Excludes `instantiation: "false"` bases. */
   system: number;
@@ -713,20 +738,30 @@ export interface ConfigStats {
    * explanation reads as presets having gone missing.
    */
   bases: number;
+  /** Active files the slicer skips, whatever the gate. See `index.notLoaded`. */
+  notLoaded: number;
+  /** Vendors whose entire bundle failed, so every preset they ship is in `notLoaded`. */
+  failedVendors: string[];
   /** Cloud sync snapshots under `_local/`, indexed but excluded everywhere else. */
   snapshots: number;
+  /** Vendors with a bundle on disk. `failedVendors` is a subset. */
   vendors: number;
   byKind: Record<string, { system: number; user: number }>;
   deepestChain: { name: string; depth: number } | null;
 }
 
 export function stats(index: ConfigIndex): ConfigStats {
+  const loaded = index.active.filter((p) => !index.notLoaded.has(p.id));
   const byKind: Record<string, { system: number; user: number }> = {};
   // Counted over selectable presets only. A vendor base is not a preset you could
   // pick — it is never added to a collection at all (PresetBundle.cpp:4929-4941) —
   // and on a config with several vendors installed the `fdm_*` set is a large
   // fraction of the "System presets" figure and the `Presets N` badge.
-  const selectable = index.active.filter((p) => p.instantiable);
+  //
+  // Off `loaded` rather than `index.active`, so the two subtractions compose: a
+  // base in a vendor bundle that threw is neither selectable nor a base the
+  // slicer holds, and it must not be counted by either figure.
+  const selectable = loaded.filter((p) => p.instantiable);
   for (const p of selectable) {
     byKind[p.kind] ??= { system: 0, user: 0 };
     byKind[p.kind][p.origin]++;
@@ -735,14 +770,18 @@ export function stats(index: ConfigIndex): ConfigStats {
   // real root carrying real settings, and the chains it roots are exactly what that
   // number is about. Dropping it here would understate every depth by one.
   let deepest: { name: string; depth: number } | null = null;
-  for (const p of index.active) {
+  // Off the loaded set too: a chain running through a file the slicer skipped is
+  // not a chain the slicer has.
+  for (const p of loaded) {
     const d = resolve(index, p).chain.length;
     if (!deepest || d > deepest.depth) deepest = { name: p.name, depth: d };
   }
   return {
     system: selectable.filter((p) => p.origin === 'system').length,
     user: selectable.filter((p) => p.origin === 'user').length,
-    bases: index.active.length - selectable.length,
+    bases: loaded.length - selectable.length,
+    notLoaded: index.active.length - loaded.length,
+    failedVendors: [...index.failedVendors.keys()].sort(),
     snapshots: index.presets.length - index.active.length,
     vendors: index.vendors.length,
     byKind,

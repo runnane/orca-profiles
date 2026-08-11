@@ -7,7 +7,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { stats } from '../domain/analyze';
-import { buildIndex, type ConfigFile, type ConfigIndex } from '../domain/index-config';
+import {
+  buildIndex,
+  type ConfigFile,
+  type ConfigIndex,
+  type LoadFailure,
+  type NotLoadedReason,
+} from '../domain/index-config';
 import type { Preset, PresetKind, PresetOrigin } from '../domain/types';
 import { isFileSystemAccessSupported, pickAndReadConfig } from '../source/fs-access';
 import { fetchServerConfig, serverConfigAvailable } from '../source/http';
@@ -351,6 +357,7 @@ export function App() {
                 <PresetRow
                   key={p.id}
                   preset={p}
+                  failure={index.notLoaded.get(p.id)}
                   selected={p.id === selectedId}
                   onSelect={() => setSelectedId(p.id)}
                 />
@@ -440,12 +447,23 @@ function Topbar({ children }: { children?: React.ReactNode }) {
   );
 }
 
+/** Why a file in the loaded folder is nonetheless absent from the slicer. */
+const NOT_LOADED_LABEL: Record<NotLoadedReason, string> = {
+  'name-clash': 'name taken',
+  'bad-version': 'bad version',
+  'parent-not-loaded': 'parent missing',
+  'bundle-failed': 'vendor failed',
+};
+
 function PresetRow({
   preset,
+  failure,
   selected,
   onSelect,
 }: {
   preset: Preset;
+  /** Set when the slicer skips this file. See `index.notLoaded`. */
+  failure?: LoadFailure;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -454,14 +472,20 @@ function PresetRow({
   // The same name legitimately exists in more than one place, so the row has to
   // carry where it lives or two rows are indistinguishable.
   const where = preset.origin === 'system' ? preset.vendor : preset.profile;
+  // Two different ways of not being loaded, and both belong on the row. Scope is
+  // "in a folder the slicer does not read"; `failure` is "in the folder it does
+  // read, and skipped anyway" — which is the one that reads as "but it is right
+  // there". Dropping the row instead would be silent absence, which for a whole
+  // vendor disappearing at once is worse than being wrongly present.
   const inactive = preset.scope !== 'active';
+  const skipped = failure !== undefined;
   return (
     <button
       type="button"
       className="row"
       aria-selected={selected}
       onClick={onSelect}
-      style={inactive ? { opacity: 0.55 } : undefined}
+      style={inactive || skipped ? { opacity: 0.55 } : undefined}
     >
       <span className="name" title={preset.path}>
         {detached && <span className="dot warn" aria-hidden="true" title="Detached full copy" />}
@@ -469,6 +493,7 @@ function PresetRow({
       </span>
       <span className="meta">
         {inactive ? 'not loaded · ' : ''}
+        {failure ? `${NOT_LOADED_LABEL[failure.reason]} · ` : ''}
         {/* A vendor base is kept in this list on purpose — opening one to see where
             an inherited value came from is the point of the app — but it is not a
             preset you could select, so it says so rather than sitting here looking
@@ -523,6 +548,12 @@ function Overview({
           <span className="n">{s.deepestChain?.depth ?? 0}</span>
           <span className="l">Deepest chain</span>
         </div>
+        {s.notLoaded > 0 && (
+          <div className="stat">
+            <span className="n">{s.notLoaded}</span>
+            <span className="l">Never loaded</span>
+          </div>
+        )}
         {s.snapshots > 0 && (
           <div className="stat">
             <span className="n">{s.snapshots}</span>
@@ -530,6 +561,34 @@ function Overview({
           </div>
         )}
       </div>
+
+      {/* Said here rather than only in Health: the counts above are the slicer's
+          numbers, not the disk's, and a difference that large needs its reason on
+          screen beside it. A whole vendor can be in here. */}
+      {s.notLoaded > 0 && (
+        <p className="muted">
+          The counts above are what OrcaSlicer <strong>loads</strong>. A further {s.notLoaded}{' '}
+          {s.notLoaded === 1 ? 'file is' : 'files are'} in the folder it reads and skipped anyway —
+          editing {s.notLoaded === 1 ? 'it' : 'them'} changes nothing.
+          {s.failedVendors.length > 0 && (
+            <>
+              {' '}
+              That includes everything shipped by{' '}
+              {s.failedVendors.map((v) => (
+                <span key={v} className="mono">
+                  {v}{' '}
+                </span>
+              ))}
+              — one unresolvable <span className="mono">inherits</span> fails a vendor's whole
+              bundle, presets and printer models together.
+            </>
+          )}{' '}
+          <button type="button" className="chip" onClick={onOpenHealth}>
+            Health
+          </button>{' '}
+          says which gate each one hit.
+        </p>
+      )}
 
       {timing && (
         <p className="faint mono" style={{ marginTop: -8, fontSize: 11 }}>

@@ -97,7 +97,12 @@
  */
 
 import { evaluateCondition, printerInjectedVars, type ConditionContext } from './condition';
-import { isInstantiable, shadowedIds, type ConfigIndex } from './index-config';
+import {
+  isInstantiable,
+  loadedVendorModels,
+  notLoadedIds,
+  type ConfigIndex,
+} from './index-config';
 import { hasVariant } from './installed';
 import { referenceNames } from './references';
 import { chainLookup, resolve, type ChainValue } from './resolve';
@@ -429,12 +434,20 @@ function seededFilaments(index: ConfigIndex, exclusions: Map<string, Set<string>
   const out = new Set<string>();
   if (!index.installed.present) return out;
 
-  const vendorHasModels = new Set(index.vendorModels.map((m) => m.vendor));
+  // Declared models minus the ones that went down with their bundle: the seeding
+  // reads `printer.vendor->models`, and a vendor the merge skipped has no
+  // `VendorProfile` in the app at all.
+  const models = loadedVendorModels(index);
+  const vendorHasModels = new Set(models.map((m) => m.vendor));
   const activeNamed = (name: string, kind: Preset['kind']) =>
-    (index.byName.get(name) ?? []).filter((p) => p.kind === kind && p.scope === 'active');
+    (index.byName.get(name) ?? []).filter(
+      (p) => p.kind === kind && p.scope === 'active' && !index.notLoaded.has(p.id),
+    );
 
   for (const machine of index.active) {
     if (machine.kind !== 'machine' || machine.origin !== 'system' || !machine.vendor) continue;
+    // A printer the slicer never loaded cannot be the one that gets seeded.
+    if (index.notLoaded.has(machine.id)) continue;
     // `printer.vendor && (! printer.vendor->models.empty())`.
     if (!vendorHasModels.has(machine.vendor)) continue;
 
@@ -453,9 +466,7 @@ function seededFilaments(index: ConfigIndex, exclusions: Map<string, Set<string>
     if (anyInstalledFits) continue;
 
     const model = settingText(settings, 'printer_model');
-    const declared = index.vendorModels.find(
-      (m) => m.vendor === machine.vendor && m.id === model,
-    );
+    const declared = models.find((m) => m.vendor === machine.vendor && m.id === model);
     // `if (!printer_model) continue;` — nothing to take defaults from.
     if (!declared) continue;
     for (const name of declared.defaultMaterials) {
@@ -548,7 +559,11 @@ export function compatibilityFor(
   machine: Preset,
   opts: CompatibilityOptions = {},
 ): PrinterCompatibility {
-  const dead = shadowedIds(index);
+  // Every preset the slicer skips, not just the clash losers. A file dropped for
+  // its `version`, one whose parent never loaded, and one belonging to a vendor
+  // bundle that threw are all equally absent from the combo box — offering any of
+  // them would be describing a preset the slicer has never read.
+  const dead = notLoadedIds(index);
   const exclusions = libraryExclusions(index);
   const visibility = visibilityIndex(index);
 

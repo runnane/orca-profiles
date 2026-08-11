@@ -25,6 +25,7 @@ import {
   buildIndex,
   clashScope,
   classifyReference,
+  loadedVendorModels,
   loadOrder,
   lookupParent,
   shadowedIds,
@@ -59,10 +60,13 @@ describe('index', () => {
     const s = stats(index);
     expect(s.user).toBeGreaterThan(5);
     expect(s.system).toBeGreaterThan(5);
-    // Acme, Globex, and OrcaFilamentLibrary — which is a vendor bundle like any
-    // other, and is counted as one.
-    expect(s.vendors).toBe(3);
+    // Acme, Globex, Initech, and OrcaFilamentLibrary — which is a vendor bundle
+    // like any other, and is counted as one.
+    expect(s.vendors).toBe(4);
     expect(index.vendors).toContain('OrcaFilamentLibrary');
+    // `vendors` is what is on disk; `failedVendors` is the subset the slicer
+    // never ends up holding, and the two are deliberately different numbers.
+    expect(s.failedVendors).toEqual(['Initech']);
   });
 
   it('loads only the profile named by preset_folder', () => {
@@ -1075,11 +1079,13 @@ describe('printer compatibility', () => {
       },
       {
         path: 'user/default/machine/mine.json',
-        text: JSON.stringify({ name: 'Shop One', inherits: 'Acme Base' }),
+        // `version` matters here: a user preset whose version does not parse is
+        // dropped by the slicer, and `compatibilityFor` no longer offers one.
+        text: JSON.stringify({ name: 'Shop One', version: '2.4.0.3', inherits: 'Acme Base' }),
       },
       {
         path: 'user/default/filament/f.json',
-        text: JSON.stringify({ name: 'F', compatible_printers: ['Acme Base'] }),
+        text: JSON.stringify({ name: 'F', version: '2.4.0.3', compatible_printers: ['Acme Base'] }),
       },
     ]);
     const pick = (printer: string) =>
@@ -2000,24 +2006,24 @@ describe('a vendor inherits inside its own bundle', () => {
   });
 
   it('refuses a cross-vendor parent that is not in the library', () => {
-    const globex = sys('system/Globex/filament/Globex ABS @System.json');
-    const r = inherits(globex, 'fdm_filament_abs');
+    const initech = sys('system/Initech/filament/Initech ABS @System.json');
+    const r = inherits(initech, 'fdm_filament_abs');
     expect(r.reason).toBe('other-vendor');
     expect(r.target).toBeUndefined();
     // The file it names is still reported, so the finding can say whose it is.
     expect(r.others[0].vendor).toBe('Acme');
-    expect(lookupParent(index, 'fdm_filament_abs', globex)).toBeUndefined();
+    expect(lookupParent(index, 'fdm_filament_abs', initech)).toBeUndefined();
   });
 
   it('names the owning vendor, and says the whole bundle fails', () => {
     const f = findings.filter((x) => x.id.startsWith('cross-vendor-inherits:'));
     expect(f).toHaveLength(1);
     expect(f[0].severity).toBe('high');
-    expect(f[0].title).toContain('Globex');
+    expect(f[0].title).toContain('Initech');
     expect(f[0].title).toContain('Acme');
     // Not "this preset is missing": the caller raises a ConfigurationError for the
     // vendor's entire bundle, which is a much bigger claim and the actionable one.
-    expect(f[0].detail).toContain("Globex's entire bundle");
+    expect(f[0].detail).toContain("Initech's entire bundle");
     expect(f[0].detail).toContain('PresetBundle.cpp:2216-2219');
     expect(f[0].reference?.unresolved[0].reason).toBe('other-vendor');
   });
@@ -2106,13 +2112,13 @@ describe('a vendor inherits inside its own bundle', () => {
     ).toBe('other-vendor');
   });
 
-  it('leaves the fixture’s two vendor machine bases unreported', () => {
-    // Acme and Globex each ship `fdm_machine_common` now, which they have to: the
-    // library cannot supply a machine base. A base never enters a collection
+  it('leaves the fixture’s vendor machine bases unreported', () => {
+    // Acme, Globex and Initech each ship `fdm_machine_common`, which they have to:
+    // the library cannot supply a machine base. A base never enters a collection
     // (PresetBundle.cpp:4929), so this is not a duplicate name.
     const both = index.active.filter((p) => p.name === 'fdm_machine_common');
-    expect(both).toHaveLength(2);
-    expect(new Set(both.map((p) => p.vendor))).toEqual(new Set(['Acme', 'Globex']));
+    expect(both).toHaveLength(3);
+    expect(new Set(both.map((p) => p.vendor))).toEqual(new Set(['Acme', 'Globex', 'Initech']));
     expect(findings.filter((f) => f.kind === 'duplicate-name' && f.title.includes('fdm_machine_common'))).toEqual([]);
   });
 
@@ -2120,6 +2126,188 @@ describe('a vendor inherits inside its own bundle', () => {
     // The issue asked for this rather than assuming nothing else shifts: the
     // fixture's deepest chain is a user process and is unaffected by a vendor rule.
     expect(stats(index).deepestChain).toEqual({ name: '0.28mm Draft @Acme - Copy', depth: 5 });
+  });
+});
+
+describe('a failed vendor bundle takes everything the vendor ships', () => {
+  // ORCA-26. `parse_subfile` returning a reason is not a skipped preset: each of
+  // the three per-type loops turns it into `throw ConfigurationError`
+  // (PresetBundle.cpp:5123-5129, :5141-5147, :5161-5167), the vendor was loaded
+  // into a temporary `PresetBundle` (:2253), and a bundle that threw is never
+  // merged (:2271-2283). Initech is the fixture's doomed vendor.
+  const findings = analyze(index);
+  const initech = index.active.filter((p) => p.vendor === 'Initech');
+  const failure = (id: string) => index.notLoaded.get(id);
+
+  it('marks every one of the vendor’s presets, not just the violating one', () => {
+    expect(initech.length).toBeGreaterThan(3);
+    for (const p of initech) {
+      expect(failure(p.id)).toMatchObject({ reason: 'bundle-failed', vendor: 'Initech' });
+    }
+    // Including the presets with nothing wrong with them, which is the whole
+    // point — `Initech PLA @System` inherits a library base and would load fine
+    // in a bundle that had not already thrown.
+    expect(failure('system/Initech/filament/Initech PLA @System.json')).toMatchObject({
+      reason: 'bundle-failed',
+      parentName: 'fdm_filament_abs',
+    });
+  });
+
+  it('names one violating preset as the cause, so the failure is explainable', () => {
+    expect(index.failedVendors.get('Initech')).toMatchObject({
+      vendor: 'Initech',
+      presetName: 'Initech ABS @System',
+      inherits: 'fdm_filament_abs',
+      ownerVendor: 'Acme',
+    });
+  });
+
+  it('leaves the other vendors completely untouched', () => {
+    // The parallel loads are independent (PresetBundle.cpp:2250-2265), so one bad
+    // bundle must not take a good one with it. This is the guard against the
+    // change quietly emptying a healthy config.
+    expect([...index.failedVendors.keys()]).toEqual(['Initech']);
+    for (const p of index.active) {
+      if (p.vendor === 'Initech') continue;
+      expect(failure(p.id)?.reason).not.toBe('bundle-failed');
+    }
+    // And Acme, whose base was the one reached for, still resolves it itself.
+    const acme = index.active.find((p) => p.path === 'system/Acme/filament/Acme ABS @System.json')!;
+    expect(classifyReference(index, acme, 'filament', 'fdm_filament_abs', 'inherits').reason).toBe(
+      'resolved',
+    );
+  });
+
+  it('does not count them as loaded', () => {
+    const s = stats(index);
+    expect(s.notLoaded).toBeGreaterThanOrEqual(initech.length);
+    expect(s.failedVendors).toEqual(['Initech']);
+    // The count has to be the loaded set, not the on-disk set: the badge reading
+    // higher than the slicer's is the symptom this issue is about. `bases` is the
+    // other subtraction (ORCA-9) and the two have to compose, not overlap.
+    const loaded = index.active.filter((p) => !index.notLoaded.has(p.id));
+    expect(s.system + s.user + s.bases).toBe(loaded.length);
+    expect(s.system + s.user + s.bases).toBeLessThan(index.active.length);
+  });
+
+  it('takes the vendor’s printer models with it', () => {
+    // `vendor_profile.models` is emplaced into the same temporary bundle at
+    // PresetBundle.cpp:4824, before any preset is read, and reaches the app only
+    // through the merge at :2422.
+    expect(index.vendorModels.some((m) => m.vendor === 'Initech')).toBe(true);
+    expect(loadedVendorModels(index).some((m) => m.vendor === 'Initech')).toBe(false);
+    expect(loadedVendorModels(index).some((m) => m.vendor === 'Acme')).toBe(true);
+  });
+
+  it('stops offering the vendor’s filaments for a printer', () => {
+    const c = compatibilityFor(index, byFile('user/default/machine/Workshop Cube.json'));
+    expect(c.filaments.some((x) => x.preset.vendor === 'Initech')).toBe(false);
+    // …and still offers the healthy vendors', so this is not "offer nothing".
+    expect(c.filaments.some((x) => x.preset.vendor === 'Acme')).toBe(true);
+  });
+
+  it('draws them as dead in the graph rather than dropping them', () => {
+    // Silent absence is the failure mode this issue's "care needed" section warns
+    // about, so the node stays and is marked.
+    const g = buildGraph(index, { includeSystemOnly: true });
+    const node = g.nodes.find((n) => n.id === 'system/Initech/filament/Initech PLA @System.json');
+    expect(node).toBeDefined();
+    expect(node?.shadowed).toBe(true);
+  });
+
+  it('says in the finding what actually disappears', () => {
+    const f = findings.find((x) => x.id === 'cross-vendor-inherits:Initech')!;
+    expect(f.detail).toContain("Initech's entire bundle");
+    expect(f.detail).toContain('printer model');
+    expect(f.detail).toContain('PresetBundle.cpp:4824');
+  });
+
+  it('cascades into a user preset that inherits from the dropped vendor', () => {
+    const built = buildIndex([
+      {
+        path: 'system/Acme/filament/base.json',
+        text: JSON.stringify({ name: 'acme_base', instantiation: 'false' }),
+      },
+      {
+        path: 'system/Initech/filament/bad.json',
+        text: JSON.stringify({ name: 'Initech ABS', inherits: 'acme_base' }),
+      },
+      {
+        path: 'system/Initech/filament/ok.json',
+        text: JSON.stringify({ name: 'Initech PLA' }),
+      },
+      {
+        path: 'user/default/filament/mine.json',
+        text: JSON.stringify({ name: 'Mine', version: '2.4.0.3', inherits: 'Initech PLA' }),
+      },
+    ]);
+    expect(built.notLoaded.get('system/Initech/filament/ok.json')?.reason).toBe('bundle-failed');
+    // The user gate is the existing `inherits` fixpoint: the parent is not in the
+    // collection, so the child is skipped exactly as if its version had failed.
+    expect(built.notLoaded.get('user/default/filament/mine.json')).toMatchObject({
+      reason: 'parent-not-loaded',
+      parentName: 'Initech PLA',
+    });
+  });
+
+  it('does not fail a bundle over a parent that is simply absent', () => {
+    // Deliberately narrower than the C++, and in lockstep with the finding: the
+    // slicer fails the bundle here too, but `crossVendorInheritFindings` does not
+    // report an absent name, and a vendor emptying out with nothing on screen to
+    // explain it is worse than one wrongly present.
+    const built = buildIndex([
+      {
+        path: 'system/Initech/filament/x.json',
+        text: JSON.stringify({ name: 'X', inherits: 'nothing_has_this_name' }),
+      },
+    ]);
+    expect(built.failedVendors.size).toBe(0);
+    expect(built.notLoaded.size).toBe(0);
+  });
+
+  it('does not fail a bundle whose inherits resolve inside it', () => {
+    // The control for the whole rule. A healthy two-vendor config must come back
+    // with nothing marked at all.
+    const built = buildIndex([
+      {
+        path: 'system/OrcaFilamentLibrary/filament/base.json',
+        text: JSON.stringify({ name: 'fdm_filament_common', instantiation: 'false' }),
+      },
+      {
+        path: 'system/Acme/filament/a.json',
+        text: JSON.stringify({ name: 'Acme PLA', inherits: 'fdm_filament_common' }),
+      },
+      {
+        path: 'system/Globex/machine/base.json',
+        text: JSON.stringify({ name: 'globex_base', instantiation: 'false' }),
+      },
+      {
+        path: 'system/Globex/machine/m.json',
+        text: JSON.stringify({ name: 'Globex Box', inherits: 'globex_base' }),
+      },
+    ]);
+    expect(built.failedVendors.size).toBe(0);
+    expect([...built.notLoaded.keys()]).toEqual([]);
+    expect(stats(built).notLoaded).toBe(0);
+  });
+
+  it('fails each violating bundle separately, and only those', () => {
+    const built = buildIndex([
+      {
+        path: 'system/Acme/filament/base.json',
+        text: JSON.stringify({ name: 'acme_base', instantiation: 'false' }),
+      },
+      { path: 'system/Acme/filament/a.json', text: JSON.stringify({ name: 'Acme PLA', inherits: 'acme_base' }) },
+      { path: 'system/Globex/filament/g.json', text: JSON.stringify({ name: 'Globex PLA', inherits: 'acme_base' }) },
+      { path: 'system/Initech/filament/i.json', text: JSON.stringify({ name: 'Initech PLA', inherits: 'acme_base' }) },
+    ]);
+    expect([...built.failedVendors.keys()].sort()).toEqual(['Globex', 'Initech']);
+    expect(built.notLoaded.has('system/Acme/filament/a.json')).toBe(false);
+    // Acme's two files and nothing else — the other two are gone with their
+    // bundles. One of Acme's is a base, so it lands in `bases` rather than
+    // `system` (ORCA-9); together they are the whole loaded set.
+    const s = stats(built);
+    expect([s.system, s.bases, s.notLoaded]).toEqual([1, 1, 2]);
   });
 });
 
@@ -2275,6 +2463,7 @@ describe('vendor bases are not presets you can pick', () => {
       'Acme/fdm_process_acme_common',
       'Acme/fdm_process_common',
       'Globex/fdm_machine_common',
+      'Initech/fdm_machine_common',
       'OrcaFilamentLibrary/fdm_filament_common',
     ]);
     // The flag is on the preset, decided once in `buildIndex`, so nothing has to
@@ -2287,9 +2476,18 @@ describe('vendor bases are not presets you can pick', () => {
     // Pinned against the fixture rather than left as "greater than 5": the whole
     // point is that a number moved, and a loose assertion would not have noticed.
     const s = stats(index);
+    // Both subtractions compose, and the arithmetic is pinned so neither can be
+    // quietly folded into the other: active = selectable + bases + never-loaded.
+    // Initech's base is in `notLoaded`, not in `bases` — its bundle threw, so the
+    // slicer holds it as neither.
+    const loaded = index.active.filter((p) => !index.notLoaded.has(p.id));
+    expect(s.bases).toBe(loaded.filter((p) => !p.instantiable).length);
+    // Seven `instantiation: "false"` files on disk, six counted: Initech's is in
+    // `notLoaded`, so it is neither selectable nor a base the slicer holds.
     expect(s.bases).toBe(6);
-    expect(s.system).toBe(index.active.filter((p) => p.origin === 'system').length - 6);
-    expect(s.system + s.bases + s.user).toBe(index.active.length);
+    expect(bases).toHaveLength(7);
+    expect(s.system).toBe(loaded.filter((p) => p.origin === 'system' && p.instantiable).length);
+    expect(s.system + s.bases + s.user + s.notLoaded).toBe(index.active.length);
     // `byKind` drives the sidebar's origin chips, so it has to agree.
     const kindTotal = Object.values(s.byKind).reduce((n, k) => n + k.system + k.user, 0);
     expect(kindTotal).toBe(s.system + s.user);

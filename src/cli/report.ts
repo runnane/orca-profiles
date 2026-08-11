@@ -105,6 +105,16 @@ console.log(`  system presets      ${s.system} from ${s.vendors} vendors`);
 // a system preset inflates that figure, and dropping it silently reads as presets
 // having gone missing.
 if (s.bases > 0) console.log(`  vendor bases        ${s.bases} (not selectable)`);
+// Same argument, the other subtraction: the counts above are what the slicer
+// loads, and a whole vendor can be in the gap. Silent absence is the worse failure.
+if (s.notLoaded > 0) {
+  console.log(
+    `  never loaded        ${s.notLoaded} file${s.notLoaded === 1 ? '' : 's'} in the loaded folder, skipped anyway`,
+  );
+}
+if (s.failedVendors.length > 0) {
+  console.log(`  FAILED bundles      ${s.failedVendors.join(', ')} — every preset and model they ship`);
+}
 if (s.snapshots > 0) console.log(`  sync snapshots      ${s.snapshots} (ignored)`);
 if (s.deepestChain) {
   console.log(`  deepest chain       ${s.deepestChain.depth} — ${s.deepestChain.name}`);

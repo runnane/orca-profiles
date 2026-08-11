@@ -145,6 +145,25 @@ and the caller raises a `ConfigurationError` for that vendor's **entire bundle**
 ([PresetBundle.cpp:5121](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L5121)) —
 every preset the vendor ships is then absent from the slicer.
 
+**And its printer models with them.** The vendor is loaded into a *temporary*
+`PresetBundle`
+([:2253](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L2253))
+that is merged into the app's only when nothing threw
+([:2271-2283](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L2271)),
+and `vendor_profile.models` is emplaced into that same temporary
+([:4824](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PresetBundle.cpp#L4824))
+before any preset is read. So one unresolvable name in one file removes the
+vendor's presets, its models, and — through rule 4's cascade — anything of yours
+that inherited from it.
+
+The app marks the whole vendor as never loaded, consistently: in the counts, the
+sidebar, the graph and the printer's filament list, with one finding per vendor
+rather than one per preset. Rows are **labelled, not dropped** — a vendor
+disappearing with no explanation is worse than one wrongly present. It
+deliberately does *not* apply the rule when the named parent is simply absent
+from the config: the slicer fails the bundle there too, but that case has no
+finding to explain it, and inventing a silent emptying is the worse error.
+
 Two limits on the shared bundle, both from where its hand-over sits in the loader:
 it carries **filament** bases only, because `m_config_maps` is assigned straight
 after the filament loop and the maps are cleared per preset type
