@@ -258,3 +258,53 @@ test('the graph’s filters survive leaving the tab, and the all-off state has a
     'true',
   );
 });
+
+/**
+ * The parent epic's own acceptance test (ORCA-13), possible for the first time
+ * now that ORCA-16 puts preset ids in the URL: deep-link straight into a printer
+ * view and assert what renders, without clicking anything to get there.
+ */
+test('a link opens straight into a printer view, and a dead link says so', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', e => errors.push(String(e)));
+
+  // In static mode the config arrives *after* the URL is read, so this also pins
+  // that the ids survive the load rather than being cleared with the tab.
+  const printer = encodeURIComponent('user/default/machine/Workshop Cube.json');
+  const process = encodeURIComponent('system/Acme/process/0.20mm Standard @Acme.json');
+  await page.goto(`/?tab=printer&printer=${printer}&process=${process}`);
+  await page.getByRole('button', { name: 'Load sample config' }).click();
+
+  // No click on a tab and no click on a picker: the link did all of it.
+  await expect(page.getByRole('tab', { name: 'Printer' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+    { timeout: 15000 },
+  );
+  // Both selects are driven by the URL, and the summary line proves the view
+  // actually rendered for that machine rather than the select merely holding a value.
+  await expect(page.locator('#printer-pick')).toHaveValue(
+    'user/default/machine/Workshop Cube.json',
+  );
+  await expect(page.locator('#process-pick')).toHaveValue(
+    'system/Acme/process/0.20mm Standard @Acme.json',
+  );
+  await expect(page.getByText('What Workshop Cube gets.')).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/6-deep-link.png` });
+
+  // Opening a preset is a history entry, so Back closes it rather than leaving.
+  await page.goto(`/?preset=${encodeURIComponent('user/default/filament/Studio ABS.json')}`);
+  await page.getByRole('button', { name: 'Load sample config' }).click();
+  await expect(page.getByText('Studio ABS').first()).toBeVisible({ timeout: 15000 });
+
+  // A link from a different config fails visibly: the id is ignored, the tab is
+  // kept, and the app says which id. Never a blank pane, never the wrong preset.
+  await page.goto('/?tab=printer&printer=user%2Fdefault%2Fmachine%2FSomeone+Elses+Printer.json');
+  await page.getByRole('button', { name: 'Load sample config' }).click();
+  await expect(page.getByText('not in this config')).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText('Someone Elses Printer.json')).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Printer' })).toHaveAttribute('aria-selected', 'true');
+  await page.screenshot({ path: `${SHOTS}/7-dead-link.png` });
+
+  expect(errors).toEqual([]);
+});
