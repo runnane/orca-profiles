@@ -2886,6 +2886,76 @@ describe('every parse_subfile guard costs the whole vendor bundle', () => {
     expect(vendorOf(built, 'Acme')).toBe('printer-variant-undeclared');
   });
 
+  it('fails the bundle for a filament with no filament_id', () => {
+    // Written by hand rather than through `sysFilament`, because the id is the
+    // thing under test — a helper that supplies it would be testing itself.
+    const built = buildIndex([
+      {
+        path: 'system/Acme/filament/a.json',
+        text: JSON.stringify({ name: 'Acme PLA @System' }),
+      },
+    ]);
+    expect(vendorOf(built, 'Acme')).toBe('filament-id-missing');
+  });
+
+  it('does not fail a bundle for a filament that inherits its id', () => {
+    // The control the issue asked for. `filament_id` is inherited, so a preset
+    // stating none is only a fault when nothing above it states one either.
+    const built = buildIndex([
+      {
+        path: 'system/Acme/filament/base.json',
+        text: JSON.stringify({
+          name: 'fdm_filament_common',
+          instantiation: 'false',
+          filament_id: 'ACMEBASE0001',
+        }),
+      },
+      {
+        path: 'system/Acme/filament/a.json',
+        text: JSON.stringify({ name: 'Acme PLA @System', inherits: 'fdm_filament_common' }),
+      },
+    ]);
+    expect(built.failedVendors.size).toBe(0);
+  });
+
+  it('lets a filament inherit its id across the library boundary', () => {
+    // The one `inherits` that crosses vendors, and `filament_id` rides it: the
+    // loader falls back to `base_bundle->m_filament_id_maps` (:4904-4909), which
+    // is the library's map. `chainValue` goes through `inheritsScope`, so this is
+    // the same boundary the `inherits` guard uses rather than a second opinion.
+    const built = buildIndex([
+      {
+        path: 'system/OrcaFilamentLibrary/filament/base.json',
+        text: JSON.stringify({
+          name: 'fdm_filament_common',
+          instantiation: 'false',
+          filament_id: 'ORCALIB0001',
+        }),
+      },
+      {
+        path: 'system/Acme/filament/a.json',
+        text: JSON.stringify({ name: 'Acme PLA @System', inherits: 'fdm_filament_common' }),
+      },
+    ]);
+    expect(built.failedVendors.size).toBe(0);
+  });
+
+  it('exempts a vendor base and the Template vendor from the filament guard', () => {
+    // Two exemptions, both by the same line of C++ shape: a base returns before
+    // the guard (:4929-4941), and `Template` is excepted by name in both places.
+    const built = buildIndex([
+      {
+        path: 'system/Acme/filament/base.json',
+        text: JSON.stringify({ name: 'fdm_filament_common', instantiation: 'false' }),
+      },
+      {
+        path: 'system/Template/filament/t.json',
+        text: JSON.stringify({ name: 'Template PLA' }),
+      },
+    ]);
+    expect(built.failedVendors.size).toBe(0);
+  });
+
   it('exempts a vendor base from the printer guards', () => {
     // `instantiation: "false"` is stored in the config map and returns before the
     // printer checks ever run (:4929-4941), so `fdm_machine_common` having no
@@ -2944,6 +3014,23 @@ describe('every parse_subfile guard costs the whole vendor bundle', () => {
     expect(new Set(bundle.map((f) => f.reference?.key))).toEqual(
       new Set(['inherits', 'machine_model_list', 'sub_path', 'printer_model']),
     );
+  });
+
+  it('words the filament_id failure as a bundle failure, and points at the author', () => {
+    const built = buildIndex([
+      { path: 'system/Acme/filament/a.json', text: JSON.stringify({ name: 'Acme PLA @System' }) },
+    ]);
+    const f = analyze(built).find((x) => x.id === 'bundle-failed:Acme')!;
+    expect(f.severity).toBe('high');
+    expect(f.title).toContain('no filament_id');
+    expect(f.detail).toContain("Acme's entire bundle");
+    expect(f.reference?.key).toBe('filament_id');
+    // This one is a rule on whoever authored the bundle, not on the user, and the
+    // wording says so rather than implying there is a file of theirs to edit.
+    expect(f.detail).toContain('report it there');
+    // …and it does not claim the log understates it: unlike the printer guards,
+    // this one logs "can not find filament_id", which is accurate as far as it goes.
+    expect(f.detail).not.toContain('understates it');
   });
 
   it('says the log text understates it, where the log says anything', () => {

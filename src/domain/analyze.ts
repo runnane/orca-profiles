@@ -658,6 +658,7 @@ function bundleFailureFindings(index: ConfigIndex): Finding[] {
 const GUARD_KEY: Record<BundleGuard, string> = {
   inherits: 'inherits',
   'model-file-missing': 'machine_model_list',
+  'filament-id-missing': 'filament_id',
   'preset-file-missing': 'sub_path',
   'printer-model-empty': 'printer_model',
   'printer-model-undeclared': 'printer_model',
@@ -689,6 +690,12 @@ function describeGuard(
         title: `${vendor} lists "${f.presetName}" but its file is missing, so the whole bundle fails`,
         cause: `\`system/${vendor}.json\` names this preset with a \`sub_path\` pointing at ${f.modelPath}, and there is no file there. \`parse_subfile\` calls \`load_from_json\` first thing (:4861), and that sets a reason for any failure to read — \`ifstream::failure\`, a parse error, or anything else (Config.cpp:278-291).`,
         fix: `Restore that file, or remove the entry from the vendor's list.`,
+      };
+    case 'filament-id-missing':
+      return {
+        title: `${vendor}'s "${f.presetName}" has no filament_id, so the whole bundle fails`,
+        cause: `Neither ${who} nor anything it inherits from sets \`filament_id\`. Every instantiable filament in a vendor bundle needs one — the loader checks it after the preset is otherwise built and returns a reason when it is empty (PresetBundle.cpp:5071-5078). Only the \`Template\` vendor is exempt, by name.`,
+        fix: `Give it a \`filament_id\`, or inherit from a base that has one. This is a rule on whoever authored the bundle rather than on you, so if this is a vendor profile you installed, report it there.`,
       };
     case 'printer-model-empty':
       return {

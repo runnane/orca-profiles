@@ -483,6 +483,8 @@ export type BundleGuard =
   | 'model-file-missing'
   /** A preset entry in a vendor list whose file cannot be read. :4861-4866. */
   | 'preset-file-missing'
+  /** An instantiable filament with no `filament_id`, stated or inherited. :5071-5078. */
+  | 'filament-id-missing'
   /** A printer preset whose resolved `printer_model` is empty. :4973-4979. */
   | 'printer-model-empty'
   /** …or is not one this vendor declares. :4988-4997. */
@@ -555,7 +557,19 @@ export interface VendorBundleFailure {
  *     vendor goes. Unlike guard 1 this needs no inference at all — the catch
  *     chain is exhaustive and right there.
  *  3. **`inherits`** — process loop, then filament, then printer (:4913-4917).
- *  4. **the four printer guards** — empty or undeclared `printer_model` /
+ *  4. **`filament-id-missing`** — an instantiable filament, `Template` excepted
+ *     (:5071-5078). Inherited, but not by walking a chain: the loader looks the
+ *     parent's name up in `filament_id_maps`, which is populated *as the loop
+ *     runs* — at :4939-4940 for a base, :5080 for an instantiable preset that
+ *     already passed. So in the slicer a filament can only inherit an id from a
+ *     parent listed **earlier** in the vendor's `filament_list`.
+ *
+ *     `chainValue` walks the chain regardless of position, so this is knowingly
+ *     **more permissive** than the loader for a late-listed parent. That is the
+ *     direction to be wrong in — a config we would otherwise mark dead over an
+ *     ordering rule this module does not model anywhere else (see the note on
+ *     list order below) gets no finding instead.
+ *  5. **the four printer guards** — empty or undeclared `printer_model` /
  *     `printer_variant` (:4973-5005). Read off the chain: the guard runs after
  *     `config = *default_config; config.apply(config_src)` (:4926-4927), which is
  *     ORCA-19.
@@ -638,15 +652,21 @@ export function failedVendorBundles(
       // A base is stored for others to inherit and returns before the rest.
       if (!isInstantiable(p)) continue;
 
-      // Guard 5 in the source — an instantiable filament with no `filament_id`
-      // (:5071-5078) — is deliberately **not** modelled here. It is real, and it
-      // fails the bundle like the rest, but it never fires on a bundle OrcaSlicer
-      // itself ships and modelling it would mean every synthetic config in the
-      // tests carrying an id that has nothing to do with what it asserts. Split
-      // out rather than half-done: ORCA-29.
-      if (kind === 'filament') continue;
+      // 4. A filament needs a `filament_id`, stated or inherited. `Template` is
+      // exempt by name, in the same breath as the instantiation check above.
+      if (kind === 'filament') {
+        if (p.vendor !== TEMPLATE_VENDOR && chainValue(byName, p, 'filament_id') === '') {
+          fail({
+            vendor: p.vendor,
+            guard: 'filament-id-missing',
+            presetId: p.id,
+            presetName: p.name,
+          });
+        }
+        continue;
+      }
 
-      // 4. The printer guards, all four, read off the chain.
+      // 5. The printer guards, all four, read off the chain.
       if (kind !== 'machine') continue;
       const byId = declared.get(p.vendor);
       // Judged only for a vendor whose model list we can actually see. A vendor
