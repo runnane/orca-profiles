@@ -228,14 +228,12 @@ const globexFilaments = [
   // Deliberately *not* an `fdm_*` base: a base never enters a collection, so two
   // vendors shipping one is not a clash at all.
   ['Shared PLA @System', { name: 'Shared PLA @System', inherits: 'fdm_filament_common', nozzle_temperature: '205' }],
-  // **A cross-vendor inherit, written on purpose.** `fdm_filament_abs` is Acme's
-  // and is not in the library, so Globex's bundle cannot see it: `parse_subfile`
-  // looks in its own per-vendor `config_maps` and then in the library's, finds
-  // neither, and returns "Can not find inherits" (PresetBundle.cpp:4889-4916) —
-  // which the caller turns into a `ConfigurationError` for the whole Globex bundle
-  // (:5133-5147). The name exists in the config and is still unreachable, which is
-  // the case a name-matching resolver gets wrong in the confident direction.
-  ['Globex ABS @System', { name: 'Globex ABS @System', inherits: 'fdm_filament_abs', nozzle_temperature: '248' }],
+  // Globex's own ABS base. Note it is *not* the cross-vendor violation — that
+  // lives in Initech below, on purpose: a vendor with the violation loses its
+  // whole bundle, and Globex carries three shapes (the cross-vendor name clash,
+  // the `renamed_from` install, the invalid `printer_model`) that only mean
+  // anything while its bundle loads.
+  ['Globex ABS @System', { name: 'Globex ABS @System', inherits: 'fdm_filament_common', nozzle_temperature: '248' }],
 ];
 for (const [, p] of globexFilaments) write(`system/Globex/filament/${p.name}.json`, p);
 
@@ -284,6 +282,66 @@ write('system/Globex.json', {
   machine_list: [
     { name: 'fdm_machine_common', sub_path: 'machine/fdm_machine_common.json' },
     { name: 'Globex Box 0.4 nozzle', sub_path: 'machine/Globex Box 0.4 nozzle.json' },
+  ],
+});
+
+// ─── a vendor whose entire bundle fails to load ────────────────────────────
+// **The cross-vendor inherit, written on purpose.** `fdm_filament_abs` is Acme's
+// and is not in the library, so Initech's bundle cannot see it: `parse_subfile`
+// looks in its own per-vendor `config_maps` and then in the library's, finds
+// neither, and returns "Can not find inherits" (PresetBundle.cpp:4889-4917).
+// The caller does not skip that one preset — it throws for the whole bundle
+// (PresetBundle.cpp:5141-5147), the vendor was being loaded into a temporary
+// `PresetBundle` (:2253), and a bundle that threw is never merged (:2271-2283).
+//
+// So everything below is on disk and absent from the slicer: three presets and
+// the printer model, which is emplaced into that same temporary at :4824 before
+// any preset is read. The name exists in the config and is still unreachable,
+// which is the case a name-matching resolver gets wrong in the confident
+// direction — and the blast radius is what ORCA-26 is about.
+//
+// Deliberately given a *valid* printer preset, a declared model and a filament
+// with no fault of its own: everything here is correct except one `inherits`,
+// so a test can tell "dropped with the bundle" apart from "dropped on its own
+// merits".
+const initechFilaments = [
+  ['Initech ABS @System', { name: 'Initech ABS @System', inherits: 'fdm_filament_abs', nozzle_temperature: '246' }],
+  ['Initech PLA @System', { name: 'Initech PLA @System', inherits: 'fdm_filament_common', filament_vendor: 'Initech', filament_type: 'PLA', nozzle_temperature: '210' }],
+];
+for (const [, p] of initechFilaments) write(`system/Initech/filament/${p.name}.json`, p);
+
+write('system/Initech/machine/fdm_machine_common.json', {
+  name: 'fdm_machine_common',
+  instantiation: 'false',
+  ...bulkSettings(43),
+  printable_height: '180',
+});
+write('system/Initech/machine/Initech Slab 0.4 nozzle.json', {
+  name: 'Initech Slab 0.4 nozzle',
+  instantiation: 'true',
+  inherits: 'fdm_machine_common',
+  printer_model: 'Initech Slab',
+  printer_variant: '0.4',
+  nozzle_diameter: '0.4',
+});
+write('system/Initech/machine/Initech Slab.json', {
+  name: 'Initech Slab',
+  model_id: 'initech-slab',
+  nozzle_diameter: '0.4',
+  machine_tech: 'FFF',
+  family: 'Initech',
+  default_materials: 'Initech PLA @System',
+});
+write('system/Initech.json', {
+  name: 'Initech',
+  version: '01.00.00.00',
+  description: 'Initech configurations',
+  machine_model_list: [{ name: 'Initech Slab', sub_path: 'machine/Initech Slab.json' }],
+  filament_list: initechFilaments.map(([n]) => ({ name: n, sub_path: `filament/${n}.json` })),
+  process_list: [],
+  machine_list: [
+    { name: 'fdm_machine_common', sub_path: 'machine/fdm_machine_common.json' },
+    { name: 'Initech Slab 0.4 nozzle', sub_path: 'machine/Initech Slab 0.4 nozzle.json' },
   ],
 });
 

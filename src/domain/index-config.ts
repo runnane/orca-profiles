@@ -116,6 +116,14 @@ export interface ConfigIndex {
   /** Printer models declared by the vendor indexes. */
   vendorModels: VendorModel[];
   /**
+   * Vendors whose entire bundle fails to load, keyed by vendor directory name.
+   *
+   * Not a per-preset fault: the bundle is loaded into a temporary `PresetBundle`
+   * and merged into the app's only on success, so a failure takes the vendor's
+   * presets **and** its `vendorModels` with it. See `failedVendorBundles`.
+   */
+  failedVendors: Map<string, VendorBundleFailure>;
+  /**
    * Active presets the slicer never loads, and why. Keyed by id.
    *
    * A file in this map is on disk and absent from the slicer: not selectable, and
@@ -355,6 +363,7 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
   }
 
   const active = presets.filter((p) => p.scope === 'active');
+  const failedVendors = failedVendorBundles(active, byName);
 
   return {
     presets,
@@ -372,19 +381,110 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
     vendors: [...vendors].sort(),
     vendorRefs,
     vendorModels,
-    notLoaded: notLoadedPresets(active, byName),
+    failedVendors,
+    notLoaded: notLoadedPresets(active, byName, failedVendors),
     installed: readInstalled(files),
     parseErrors,
   };
 }
 
 /** Why the slicer never loads a file that is nonetheless on disk. */
-export type NotLoadedReason = 'name-clash' | 'bad-version' | 'parent-not-loaded';
+export type NotLoadedReason =
+  | 'name-clash'
+  | 'bad-version'
+  | 'parent-not-loaded'
+  | 'bundle-failed';
 
 export interface LoadFailure {
   reason: NotLoadedReason;
-  /** For `parent-not-loaded`: the `inherits` value that could not be satisfied. */
+  /**
+   * For `parent-not-loaded`: the `inherits` value that could not be satisfied.
+   * For `bundle-failed`: the `inherits` value that failed the bundle.
+   */
   parentName?: string;
+  /** For `bundle-failed`: the vendor whose bundle this preset went down with. */
+  vendor?: string;
+}
+
+/**
+ * A vendor bundle that never reaches the app, and the preset that sank it.
+ *
+ * One violation is enough for all of it, which is why this is per vendor rather
+ * than per preset.
+ */
+export interface VendorBundleFailure {
+  vendor: string;
+  /** id of a preset whose `inherits` could not be resolved inside the bundle. */
+  presetId: string;
+  presetName: string;
+  /** The `inherits` value that could not be found. */
+  inherits: string;
+  /** The vendor that owns a preset by that name, when one exists. */
+  ownerVendor?: string;
+}
+
+/**
+ * Vendors whose whole bundle fails, because one of their presets names a parent
+ * their bundle cannot reach.
+ *
+ * `parse_subfile` resolves `inherits` against the vendor's own `config_maps` plus
+ * `OrcaFilamentLibrary`'s, and returns a `reason` when neither has the name:
+ *
+ * ```cpp
+ * reason = "Can not find inherits: " + inherits;
+ * return reason;
+ * ```
+ * — v2.4.2 PresetBundle.cpp:4913-4917
+ *
+ * A non-empty `reason` is not a skipped preset. Each of the three per-type loops
+ * turns it into a throw:
+ *
+ * ```cpp
+ * if (!reason.empty()) {
+ *     ++m_errors;
+ *     throw ConfigurationError(…);
+ * }
+ * ```
+ * — PresetBundle.cpp:5123-5129 (process), :5141-5147 (filament), :5161-5167 (printer)
+ *
+ * and the vendor is loaded into a **temporary** `PresetBundle` (:2253) that is
+ * merged into the app's only when no error came back (:2271-2283). So the throw
+ * discards the lot: every preset, and `vendor_profile.models` with them, since the
+ * models are emplaced into that same temporary at :4824 before any preset is read.
+ *
+ * **Deliberately narrower than the C++.** Only the `other-vendor` case is treated
+ * as a failure — the name exists, in a bundle this vendor cannot see. A vendor
+ * base naming something genuinely absent fails the bundle in the slicer too, but
+ * `crossVendorInheritFindings` does not report that case (it is a broken install,
+ * and `vendorIndexFindings` covers the index side of it), and marking a vendor
+ * failed with nothing on screen to explain it is worse than leaving it present.
+ * The gate and the finding read the same rule so the two cannot drift.
+ */
+export function failedVendorBundles(
+  active: Preset[],
+  byName: Map<string, Preset[]>,
+): Map<string, VendorBundleFailure> {
+  const out = new Map<string, VendorBundleFailure>();
+  for (const p of active) {
+    if (p.origin !== 'system' || !p.vendor || !p.inherits) continue;
+    if (out.has(p.vendor)) continue;
+    // Candidates are judged against an empty not-loaded map on purpose: a vendor's
+    // `config_maps` is filled during its own load, before any merge, so another
+    // vendor losing a name clash cannot change what this one can reach.
+    const claimed = (byName.get(p.inherits) ?? []).filter(
+      (c) => c.id !== p.id && c.kind === p.kind && c.origin === 'system',
+    );
+    if (claimed.length === 0) continue; // `absent` — see the note above.
+    if (claimed.some((c) => inheritsScope(p, c))) continue;
+    out.set(p.vendor, {
+      vendor: p.vendor,
+      presetId: p.id,
+      presetName: p.name,
+      inherits: p.inherits,
+      ownerVendor: claimed[0].vendor,
+    });
+  }
+  return out;
 }
 
 /**
@@ -409,8 +509,11 @@ export interface LoadFailure {
  * Gates 2 and 3 are **user presets only**. A system preset comes in through
  * `parse_subfile` (PresetBundle.cpp:4836+), which has no version gate at all, and
  * whose unresolvable-`inherits` path fails the *entire vendor bundle* rather than
- * one preset (PresetBundle.cpp:4913-4916) — a different consequence, tracked in
- * ORCA-10 rather than modelled here.
+ * one preset (PresetBundle.cpp:4913-4917). That is **gate 0** here, applied first
+ * and per vendor rather than per file — see `failedVendorBundles`. It needs no
+ * fixpoint of its own (a vendor's presets are marked in one pass) but it feeds
+ * gate 3: a user preset inheriting from a vendor that never arrived is skipped
+ * exactly as if the parent's own `version` had failed.
  *
  * **One corner is deliberately not modelled.** Because gate 1 runs first, a file
  * that loses a clash stays lost even if the winner is later skipped by gate 3 — in
@@ -422,10 +525,25 @@ export interface LoadFailure {
 export function notLoadedPresets(
   active: Preset[],
   byName: Map<string, Preset[]>,
+  failedVendors: Map<string, VendorBundleFailure> = failedVendorBundles(active, byName),
 ): Map<string, LoadFailure> {
   const out = new Map<string, LoadFailure>();
 
-  // Gate 2 first, because it is the only intrinsic one — it depends on nothing but
+  // Gate 0, and it is not a gate in `load_presets` at all — it is a whole vendor
+  // bundle that never arrives (`failedVendorBundles`). First, because a preset in
+  // a bundle that was never merged cannot win a name clash against one that was.
+  for (const p of active) {
+    if (p.origin !== 'system' || !p.vendor) continue;
+    const failure = failedVendors.get(p.vendor);
+    if (!failure) continue;
+    out.set(p.id, {
+      reason: 'bundle-failed',
+      vendor: p.vendor,
+      parentName: failure.inherits,
+    });
+  }
+
+  // Gate 2 next, because it is the only intrinsic one — it depends on nothing but
   // the file itself — and a preset it drops was never in the collection for gate 1
   // to clash with.
   for (const p of active) {
@@ -811,6 +929,19 @@ export function notLoadedIds(index: ConfigIndex): Set<string> {
 }
 
 /**
+ * The printer models the app actually ends up holding.
+ *
+ * `vendorModels` is what the vendor indexes *declare*. A model is emplaced into
+ * the vendor's temporary bundle (PresetBundle.cpp:4824) and only reaches
+ * `this->vendors` through the merge (:2422), which a failed bundle never gets
+ * to — so a model whose vendor is in `failedVendors` is declared and absent, the
+ * same way that vendor's presets are.
+ */
+export function loadedVendorModels(index: ConfigIndex): VendorModel[] {
+  return index.vendorModels.filter((m) => !index.failedVendors.has(m.vendor));
+}
+
+/**
  * Presets grouped by the scope their name has to be unique in.
  *
  * A preset the slicer drops for its `version` is not in the collection, so it
@@ -820,7 +951,11 @@ export function notLoadedIds(index: ConfigIndex): Set<string> {
 export function clashGroups(index: ConfigIndex): Map<string, Preset[]> {
   const groups = new Map<string, Preset[]>();
   for (const p of index.active) {
-    if (index.notLoaded.get(p.id)?.reason === 'bad-version') continue;
+    const reason = index.notLoaded.get(p.id)?.reason;
+    // Neither of these was ever in a collection to clash with: a `bad-version`
+    // file is dropped before it is constructed, and a `bundle-failed` preset
+    // belongs to a bundle that `merge_presets` is never called with at all.
+    if (reason === 'bad-version' || reason === 'bundle-failed') continue;
     const k = clashScope(p);
     if (k === undefined) continue;
     groups.set(k, [...(groups.get(k) ?? []), p]);

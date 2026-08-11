@@ -17,7 +17,7 @@ On-demand references — open the relevant one when the work matches:
 
 Two things worth loading into your head before touching this code:
 
-1. **The README's four rules are cited to OrcaSlicer's source.** Preset
+1. **The README's load rules are each cited to OrcaSlicer's source.** Preset
    resolution, load order and profile handling were derived by reading
    `Preset.cpp` / `PresetBundle.cpp` at v2.4.2, not by inferring from config
    files — inference produced five false findings. Check the source and cite it.
