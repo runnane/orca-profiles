@@ -285,15 +285,21 @@ describe('analyze', () => {
     expect(f?.title).toContain('Legacy PETG');
   });
 
-  it('says two files claim one name, without predicting which wins', () => {
-    // Both are ordinary presets in one directory, so the slicer's choice comes
-    // down to directory iteration order — claiming a winner would be invention.
+  it('says two files claim one name, and here it can name the winner', () => {
+    // The only shape a *user* name clash can take since ORCA-28: two directories,
+    // `<kind>/base/` and `<kind>/`. Two files in one directory cannot share a name
+    // at all, because a user preset is named by its filename.
+    //
+    // Which also means a user clash is never a coin toss — `base/` is a completed
+    // earlier pass (Preset.cpp:1583-1586), so the winner is knowable and is named.
+    // The arbitrary case is two *vendors*, and it has its own test.
     const f = findings.find(
-      (x) => x.kind === 'duplicate-name' && x.title.includes('Fast Draft'),
+      (x) => x.kind === 'duplicate-name' && x.title.includes('Studio Base'),
     );
     expect(f?.severity).toBe('high');
     expect(f?.detail).toContain('Preset already present, not loading');
-    expect(f?.detail).toContain('decided by directory order');
+    expect(f?.detail).not.toContain('decided by directory order');
+    expect(f?.detail).toContain('user/default/process/base/Studio Base.json');
   });
 
   it('does not report a cross-profile copy as a duplicate name', () => {
@@ -435,11 +441,11 @@ describe('dangling references', () => {
     // is installed. Reporting it would be a false finding.
     const built = buildIndex([
       {
-        path: 'user/default/machine/m.json',
+        path: 'user/default/machine/Shop Printer.json',
         text: JSON.stringify({ name: 'Shop Printer', inherits: 'Vendor Base 0.4' }),
       },
       {
-        path: 'user/default/filament/f.json',
+        path: 'user/default/filament/F.json',
         text: JSON.stringify({ name: 'F', inherits: '', compatible_printers: ['Vendor Base 0.4'] }),
       },
     ]);
@@ -456,7 +462,7 @@ describe('dangling references', () => {
         text: JSON.stringify({ name: 'Generic PLA @System', layer_height: '0.2' }),
       },
       {
-        path: 'user/default/filament/mine.json',
+        path: 'user/default/filament/Mine.json',
         text: JSON.stringify({ name: 'Mine', inherits: 'Generic PLA' }),
       },
     ]);
@@ -519,24 +525,35 @@ describe('reference classification', () => {
     // show a chain nothing has.
     const built = buildIndex([
       preset('user/default/process/base/Root.json', { name: 'Root', inherits: '' }),
-      preset('user/default/process/other.json', { name: 'Root', inherits: '' }),
-      preset('user/default/process/child.json', { name: 'Child', inherits: 'Root' }),
+      preset('user/default/process/Root.json', { name: 'Root', inherits: '' }),
+      preset('user/default/process/Child.json', { name: 'Child', inherits: 'Root' }),
     ]);
     const child = built.presets.find((p) => p.name === 'Child')!;
     const r = classifyReference(built, child, 'process', 'Root');
     expect(r.reason).toBe('shadowed');
     expect(r.target?.path).toBe('user/default/process/base/Root.json');
-    expect(r.others.map((o) => o.path)).toEqual(['user/default/process/other.json']);
+    expect(r.others.map((o) => o.path)).toEqual(['user/default/process/Root.json']);
     // `base/` is loaded first by guarantee (Preset.cpp:1583), so this one is not
     // a coin toss and must not be reported as one.
     expect(r.arbitrary).toBe(false);
   });
 
-  it('admits when a clash is decided by directory order', () => {
+  it('admits when a clash is decided by directory order — which needs two vendors', () => {
     const built = buildIndex([
-      preset('user/default/process/a.json', { name: 'Root', inherits: '' }),
-      preset('user/default/process/b.json', { name: 'Root', inherits: '' }),
-      preset('user/default/process/child.json', { name: 'Child', inherits: 'Root' }),
+      // Not two user files: since ORCA-28 a user preset is named by its filename,
+      // so two of them in one directory cannot share a name, and `base/` versus the
+      // folder is a *knowable* order. The only clash left that is genuinely a coin
+      // toss is between two vendors, whose files are enumerated with
+      // `directory_iterator` over `system/*.json` (PresetBundle.cpp:2205).
+      {
+        path: 'system/Acme/process/a.json',
+        text: JSON.stringify({ name: 'Root', inherits: '' }),
+      },
+      {
+        path: 'system/Globex/process/b.json',
+        text: JSON.stringify({ name: 'Root', inherits: '' }),
+      },
+      preset('user/default/process/Child.json', { name: 'Child', inherits: 'Root' }),
     ]);
     const child = built.presets.find((p) => p.name === 'Child')!;
     expect(classifyReference(built, child, 'process', 'Root').arbitrary).toBe(true);
@@ -545,7 +562,7 @@ describe('reference classification', () => {
   it('does not accept a sync snapshot as the thing a name refers to', () => {
     const built = buildIndex([
       preset('user/cloud-1/_local/snap/process/Root.json', { name: 'Root', inherits: '' }),
-      preset('user/default/process/child.json', { name: 'Child', inherits: 'Root' }),
+      preset('user/default/process/Child.json', { name: 'Child', inherits: 'Root' }),
     ]);
     const child = built.presets.find((p) => p.name === 'Child')!;
     expect(classifyReference(built, child, 'process', 'Root').reason).toBe('absent');
@@ -573,10 +590,10 @@ describe('dead files', () => {
   const findings = analyze(index);
 
   it('reports a shadowed file once, and not as a separate problem', () => {
-    // One of the two "Fast Draft" files is never loaded. It is also a detached
-    // full copy — but saying so invites fixing a file the slicer never reads,
+    // The folder copy of `Studio Base` is never loaded — `base/` got there first.
+    // Saying anything else about it invites fixing a file the slicer never reads,
     // so only the duplicate-name finding should mention it.
-    const ordered = loadOrder(index.active.filter((p) => p.name === 'Fast Draft'));
+    const ordered = loadOrder(index.active.filter((p) => p.name === 'Studio Base'));
     const dead = ordered[ordered.length - 1];
     const mentions = findings.filter((f) => f.presetIds.includes(dead.id));
     expect(mentions).toHaveLength(1);
@@ -1140,13 +1157,13 @@ describe('printer compatibility', () => {
         text: JSON.stringify({ name: 'Acme Cube', inherits: 'Acme Base' }),
       },
       {
-        path: 'user/default/machine/mine.json',
+        path: 'user/default/machine/Shop One.json',
         // `version` matters here: a user preset whose version does not parse is
         // dropped by the slicer, and `compatibilityFor` no longer offers one.
         text: JSON.stringify({ name: 'Shop One', version: '2.4.0.3', inherits: 'Acme Base' }),
       },
       {
-        path: 'user/default/filament/f.json',
+        path: 'user/default/filament/F.json',
         text: JSON.stringify({ name: 'F', version: '2.4.0.3', compatible_printers: ['Acme Base'] }),
       },
     ]);
@@ -1265,7 +1282,7 @@ describe('printer compatibility', () => {
     // an `alias` outright; the fixture covers the *derived* alias separately.
     const built = buildIndex([
       {
-        path: 'user/default/machine/m.json',
+        path: 'user/default/machine/Shop One.json',
         text: JSON.stringify({ name: 'Shop One', inherits: 'Vendor Base 0.4' }),
       },
       {
@@ -1312,7 +1329,7 @@ describe('printer compatibility', () => {
     // The guard is `instantiation == "false" && "Template" != vendor_name`
     // (PresetBundle.cpp:4929), so a Template-vendor base *is* loaded.
     const built = buildIndex([
-      { path: 'user/default/machine/m.json', text: JSON.stringify({ name: 'M' }) },
+      { path: 'user/default/machine/M.json', text: JSON.stringify({ name: 'M' }) },
       {
         path: 'system/Template/filament/base.json',
         text: JSON.stringify({ name: 'Template Base', instantiation: 'false' }),
@@ -2380,14 +2397,14 @@ describe('a failed vendor bundle takes everything the vendor ships', () => {
         text: JSON.stringify({ name: 'Initech PLA' }),
       },
       {
-        path: 'user/default/filament/mine.json',
+        path: 'user/default/filament/Mine.json',
         text: JSON.stringify({ name: 'Mine', version: '2.4.0.3', inherits: 'Initech PLA' }),
       },
     ]);
     expect(built.notLoaded.get('system/Initech/filament/ok.json')?.reason).toBe('bundle-failed');
     // The user gate is the existing `inherits` fixpoint: the parent is not in the
     // collection, so the child is skipped exactly as if its version had failed.
-    expect(built.notLoaded.get('user/default/filament/mine.json')).toMatchObject({
+    expect(built.notLoaded.get('user/default/filament/Mine.json')).toMatchObject({
       reason: 'parent-not-loaded',
       parentName: 'Initech PLA',
     });
@@ -2592,11 +2609,11 @@ describe('a user preset cannot inherit from a sibling in its own directory', () 
     // resolve it — and a config could then describe a cycle the slicer cannot have.
     const built = buildIndex([
       {
-        path: 'user/default/process/base/root.json',
+        path: 'user/default/process/base/Root.json',
         text: JSON.stringify({ name: 'Root', version: '2.4.0.3', inherits: 'Leaf' }),
       },
       {
-        path: 'user/default/process/leaf.json',
+        path: 'user/default/process/Leaf.json',
         text: JSON.stringify({ name: 'Leaf', version: '2.4.0.3' }),
       },
     ]);
@@ -2629,11 +2646,11 @@ describe('a user preset cannot inherit from a sibling in its own directory', () 
     // defaults to that permissive reading.
     const built = buildIndex([
       {
-        path: 'user/default/machine/m.json',
+        path: 'user/default/machine/Shop One.json',
         text: JSON.stringify({ name: 'Shop One', version: '2.4.0.3' }),
       },
       {
-        path: 'user/default/filament/f.json',
+        path: 'user/default/filament/Mine.json',
         text: JSON.stringify({
           name: 'Mine',
           version: '2.4.0.3',
@@ -2751,11 +2768,11 @@ describe('the alias a library exclusion joins on is derived, not stated', () => 
         text: JSON.stringify({ name: 'Generic PLA @System' }),
       },
       {
-        path: 'user/default/machine/m.json',
+        path: 'user/default/machine/Shop One.json',
         text: JSON.stringify({ name: 'Shop One', version: '2.4.0.3' }),
       },
       {
-        path: 'user/default/filament/mine.json',
+        path: 'user/default/filament/Generic PLA @Mine.json',
         text: JSON.stringify({
           name: 'Generic PLA @Mine',
           version: '2.4.0.3',
@@ -3063,6 +3080,75 @@ describe('a bound printer with no device profile', () => {
   });
 });
 
+describe('a user preset is named by its filename', () => {
+  // ORCA-28. `load_presets` strips `.json` off the directory entry and never reads
+  // the `name` key on that path:
+  //
+  //     std::string name = file_name.erase(file_name.size() - 5);
+  //     std::string canonical_name = this->canonical_preset_name(name, resolved_origin);
+  //     …
+  //     Preset preset(m_type, canonical_name, false);
+  //                                        — v2.4.2 Preset.cpp:1613-1622
+  //
+  // A *vendor* preset is the opposite: `parse_subfile` takes the name out of the
+  // file (PresetBundle.cpp:4867). The two rules are per origin, not shared.
+  const findings = analyze(index);
+
+  it('indexes a disagreeing file under its filename, not its `name` key', () => {
+    const p = byFile('user/default/process/base/Renamed On Disk.json');
+    expect(p.raw.name).toBe('Old Studio Name');
+    expect(p.name).toBe('Renamed On Disk');
+    // And the stated name exists nowhere, because nothing is named by it.
+    expect(index.byName.has('Old Studio Name')).toBe(false);
+  });
+
+  it('resolves an `inherits` that names the file', () => {
+    const child = byFile('user/default/process/Wants Renamed By File.json');
+    const r = classifyReference(index, child, 'process', 'Renamed On Disk', 'inherits');
+    expect(r.reason).toBe('resolved');
+    expect(r.target?.path).toBe('user/default/process/base/Renamed On Disk.json');
+    expect(index.notLoaded.has(child.id)).toBe(false);
+    // Which is the whole point: reading the `name` key would report this chain as
+    // broken — a false "missing parent", the class this repo has five of on record.
+    expect(findings.filter((f) => f.presetIds.includes(child.id) && f.kind === 'broken-parent'))
+      .toEqual([]);
+  });
+
+  it('does not resolve an `inherits` that names the `name` key', () => {
+    const child = byFile('user/default/process/Wants Renamed By File.json');
+    expect(classifyReference(index, child, 'process', 'Old Studio Name', 'inherits').reason).toBe(
+      'absent',
+    );
+  });
+
+  it('keeps the declared name for a vendor preset', () => {
+    // The control, and the reason the rule is per origin. Vendor presets are named
+    // from the file and from the index entry, and getting this backwards would
+    // rename every system preset to its `sub_path` basename.
+    const p = byFile('system/Acme/filament/Acme PETG @Cube.json');
+    expect(p.name).toBe('Acme PETG @Cube');
+    const base = byFile('system/OrcaFilamentLibrary/filament/fdm_filament_common.json');
+    expect(base.name).toBe('fdm_filament_common');
+  });
+
+  it('makes a same-directory name clash impossible for user presets', () => {
+    // Two files in one directory cannot share a name, because the name *is* the
+    // filename. So the only user clash left is across the two passes — `base/` and
+    // the folder — and it is knowable rather than a coin toss.
+    const byDir = new Map<string, Set<string>>();
+    for (const p of index.presets) {
+      if (p.origin !== 'user') continue;
+      const dir = p.path.slice(0, p.path.lastIndexOf('/'));
+      const seen = byDir.get(dir) ?? new Set<string>();
+      expect(seen.has(p.name)).toBe(false);
+      seen.add(p.name);
+      byDir.set(dir, seen);
+    }
+    // …and the clash that does exist is the `base/` one.
+    expect(index.notLoaded.get('user/default/process/Studio Base.json')?.reason).toBe('name-clash');
+  });
+});
+
 describe('the dropdown’s own grouping', () => {
   // Modelled on `PlaterPresetComboBox::update` (v2.4.2 PresetComboBoxes.cpp), so
   // that the two lists can be read side by side rather than reconciled by eye.
@@ -3141,7 +3227,7 @@ describe('the dropdown’s own grouping', () => {
 describe('the dropdown’s row order', () => {
   const files = (names: { name: string; vendor?: string; type?: string }[]) => [
     { path: 'OrcaSlicer.conf', text: JSON.stringify({ filaments: names.map((n) => n.name), models: [] }) },
-    { path: 'user/default/machine/m.json', text: JSON.stringify({ name: 'Mine' }) },
+    { path: 'user/default/machine/Mine.json', text: JSON.stringify({ name: 'Mine' }) },
     ...names.map((n, i) => ({
       path: `system/V/filament/f${i}.json`,
       text: JSON.stringify({

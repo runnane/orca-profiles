@@ -135,8 +135,23 @@ Not merged, not renamed — skipped, with `"Preset already present, not loading"
 ([Preset.cpp:1619](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1619)).
 Load order is system bundles → `base/` → the rest of the folder.
 
-The sample config has two files both declaring one name. One of them has no
-effect on anything, and nothing in the slicer tells you which.
+**For your own presets, the name is the filename.** `load_presets` strips `.json`
+off the directory entry and never reads the `name` key inside the file
+([Preset.cpp:1613](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L1613));
+a *vendor* preset is the opposite, named from the file's `name` and the vendor
+index. The slicer keeps the two in step — `path_from_name` derives the filename
+from the name
+([Preset.cpp:3869](https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Preset.cpp#L3869))
+— so this only bites a file produced some other way: hand-edited, scripted,
+renamed on disk, restored from a backup. Rename `jon ABS.json` to `jon ABS
+2.json` and you have renamed the preset; edit the `name` inside it and you have
+changed nothing at all.
+
+Two consequences, and the app models both. Two files in **one directory** cannot
+clash, because the name is the filename. So a user clash needs the two passes —
+`<type>/base/` and `<type>/` — and it is then *knowable* rather than a coin toss,
+because `base/` is read first. The sample config has exactly that pair: one of
+the two has no effect on anything, and nothing in the slicer tells you which.
 
 **Two vendors claiming one name is a different mechanism with the same result.**
 Each vendor loads into its own bundle — in parallel, and independently, because
