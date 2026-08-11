@@ -69,12 +69,26 @@ export interface InstalledState {
   filaments: Set<string>;
   /** `vendor id -> printer model -> variants`, the `models` section. */
   variants: Map<string, Map<string, Set<string>>>;
+  /**
+   * Model ids of the printers this install has paired with.
+   *
+   * From `local_machines[*].printer_type` — read here as `bound_models`, which is
+   * the derived list `redactConfJson` forwards rather than the map itself. The map
+   * is keyed by printer IP and carries device names and serials; none of that
+   * crosses the wire, and none of it is needed. See ORCA-18.
+   *
+   * Empty means "no device is paired, or we could not read the section", and the
+   * two are not distinguished on purpose: the only consumer reports nothing in
+   * either case, so an unreadable conf produces silence rather than a guess.
+   */
+  boundModels: Set<string>;
 }
 
 export const EMPTY_INSTALLED: InstalledState = {
   present: false,
   filaments: new Set(),
   variants: new Map(),
+  boundModels: new Set(),
 };
 
 /** `AppConfig::get_variant` (AppConfig.cpp:1272-1278). */
@@ -169,5 +183,39 @@ export function readInstalled(files: ConfigFile[]): InstalledState {
     present: true,
     filaments: readFilaments(parsed.filaments),
     variants: readVariantMap(parsed.models),
+    boundModels: readBoundModels(parsed.bound_models, parsed.local_machines),
   };
+}
+
+/**
+ * Which printer models are paired, from whichever shape the transport delivered.
+ *
+ * Two, and the domain must not care which — that is what lets the same code run
+ * in the browser, in the container and in the terminal report:
+ *
+ *  - **`bound_models`**, a list of model ids. This is what the *server* sends: the
+ *    conf crosses a network boundary there, so `redactConfJson` projects
+ *    `local_machines` down to model ids and the map itself never leaves
+ *    (ORCA-18). Read defensively — a non-list, or a list of non-strings, is a
+ *    transport fault rather than a config anyone can fix.
+ *  - **`local_machines`**, the raw map, when the conf was read straight off disk
+ *    by the browser picker, the fixtures loader or the CLI. Nothing has crossed a
+ *    boundary in those, so the file is whole; the same projection is applied here
+ *    so that both paths yield the same answer.
+ *
+ * `bound_models` wins when both are present: if the server sent one, that is the
+ * authoritative view of what it was willing to share.
+ */
+function readBoundModels(sent: unknown, raw: unknown): Set<string> {
+  if (Array.isArray(sent)) {
+    return new Set(sent.filter((v): v is string => typeof v === 'string' && v.trim() !== ''));
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return new Set();
+  const out = new Set<string>();
+  for (const entry of Object.values(raw as Record<string, unknown>)) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const t = (entry as Record<string, unknown>).printer_type;
+    if (typeof t === 'string' && t.trim() !== '') out.add(t.trim());
+  }
+  return out;
 }

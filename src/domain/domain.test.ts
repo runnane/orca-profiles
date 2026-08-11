@@ -1889,7 +1889,7 @@ describe('transport redaction', () => {
     expect(JSON.parse(out).local_machines).toEqual({});
   });
 
-  it('reduces OrcaSlicer.conf to the three fields the app needs', () => {
+  it('reduces OrcaSlicer.conf to the four fields the app needs', () => {
     const out = redactConfJson(
       JSON.stringify({
         app: { preset_folder: 'cloud-abc', other_setting: 'kept out' },
@@ -1905,10 +1905,69 @@ describe('transport redaction', () => {
       app: { preset_folder: 'cloud-abc' },
       filaments: ['Acme PLA @System'],
       models: [{ vendor: 'Acme', model: 'Acme Cube', nozzle_diameter: '0.4' }],
+      // Readable, and genuinely names no `printer_type` — so an empty list is the
+      // *config's* claim rather than ours, forwarded for the same reason a real
+      // `filaments: []` is. An unreadable section is omitted instead; see below.
+      bound_models: [],
     });
     for (const leak of ['pairing-code', 'SERIAL123', '192.0.2.5', 'ender', 'secret', 'kept out']) {
       expect(out).not.toContain(leak);
     }
+  });
+
+  it('takes only the model id out of local_machines, and nothing else', () => {
+    // ORCA-18 widened the allowlist by one field, and this is the guard on it.
+    // The input is written in the failing direction: every entry carries the
+    // address, name and serial that a forwarded-object-with-fields-deleted would
+    // emit, and the map is keyed by IP so the *keys* leak too if they are kept.
+    const out = redactConfJson(
+      JSON.stringify({
+        local_machines: {
+          '192.0.2.10': {
+            dev_ip: '192.0.2.10',
+            dev_name: 'Workshop Cube',
+            dev_id: '00M00A000000001',
+            access_code: '11223344',
+            printer_type: 'acme-cube',
+          },
+          '198.51.100.7': {
+            dev_ip: '198.51.100.7',
+            dev_name: 'Back Room Box',
+            dev_id: '00M00G000000003',
+            printer_type: 'globex-box',
+          },
+          // A second device of a model already listed: deduped, so the payload
+          // says which models are bound and not how many machines there are.
+          '203.0.113.9': { dev_ip: '203.0.113.9', printer_type: 'acme-cube' },
+        },
+      }),
+    );
+    expect(JSON.parse(out).bound_models).toEqual(['acme-cube', 'globex-box']);
+    for (const leak of [
+      '192.0.2.10',
+      '198.51.100.7',
+      '203.0.113.9',
+      'Workshop Cube',
+      'Back Room Box',
+      '00M00A000000001',
+      '00M00G000000003',
+      '11223344',
+    ]) {
+      expect(out).not.toContain(leak);
+    }
+  });
+
+  it('omits bound_models when the section cannot be read', () => {
+    // Absence is passed on as absence. An empty list would be the claim "no
+    // printer is paired", and the reader acts on it by reporting nothing — so
+    // manufacturing it out of a section we failed to read would turn a transport
+    // accident into a clean bill of health.
+    for (const value of ['not-an-object', 42, null, ['a', 'list']]) {
+      const out = JSON.parse(redactConfJson(JSON.stringify({ local_machines: value })));
+      expect(out).not.toHaveProperty('bound_models');
+    }
+    // …and absent entirely is absent too.
+    expect(JSON.parse(redactConfJson('{}'))).not.toHaveProperty('bound_models');
   });
 
   it('rebuilds a models entry rather than forwarding it', () => {
@@ -2930,6 +2989,77 @@ describe('every parse_subfile guard costs the whole vendor bundle', () => {
     // …and the `inherits` guard logs no such thing, so it does not claim it does.
     const i = analyze(index).find((x) => x.id === 'bundle-failed:Initech')!;
     expect(i.detail).not.toContain('understates it');
+  });
+});
+
+describe('a bound printer with no device profile', () => {
+  // ORCA-18, decided: extend the conf allowlist with a derived list of
+  // `local_machines[*].printer_type` — model ids only — and gate the check on it.
+  const findings = analyze(index);
+  const of = (id: string) => findings.find((f) => f.id === `device-profile:${id}`);
+
+  it('reads the bound models the server derived, and nothing more', () => {
+    expect([...index.installed.boundModels].sort()).toEqual([
+      'acme-cube',
+      'globex-box',
+      'shed-special',
+    ]);
+    // The fixture binds two devices of one model on two addresses; the payload
+    // carries the model once and no address at all.
+    expect(index.installed.boundModels.size).toBe(3);
+  });
+
+  it('says nothing about a model whose profile is downloaded', () => {
+    expect(index.deviceProfiles.has('acme-cube')).toBe(true);
+    expect(of('acme-cube')).toBeUndefined();
+  });
+
+  it('reports a declared model with no profile as a sync gap', () => {
+    const f = of('globex-box')!;
+    expect(f.severity).toBe('low');
+    expect(f.title).toContain('Globex');
+    // The consequence, stated as small as the source says it is.
+    expect(f.detail).toContain('json_diff.cpp:92-107');
+    expect(f.detail).toContain('host upload, `compatible_printers` and preset resolution');
+    expect(f.detail).not.toContain('costs the network');
+  });
+
+  it('reports a user-defined model as informational, not as a fault', () => {
+    // "Do not report the second as an error" — the issue's own words. There will
+    // never be a file for a self-defined machine, so telling someone to fix it
+    // would be telling them to fix the unfixable.
+    const f = of('shed-special')!;
+    expect(f.severity).toBe('low');
+    expect(f.detail).toContain('Nothing is wrong');
+    expect(f.weight).toBeLessThan(of('globex-box')!.weight);
+  });
+
+  it('reports nothing at all when no printer is paired', () => {
+    // The gate, and the reason the whole issue needed a decision: ungated, this
+    // check fires for most models on any install and is wrong for any printer
+    // that does not speak the Bambu protocol.
+    const built = buildIndex([
+      {
+        path: 'OrcaSlicer.conf',
+        text: JSON.stringify({ app: { preset_folder: '' }, filaments: ['x'] }),
+      },
+      {
+        path: 'system/Acme.json',
+        text: JSON.stringify({
+          name: 'Acme',
+          machine_model_list: [{ name: 'Cube', sub_path: 'machine/Cube.json' }],
+          machine_list: [],
+          filament_list: [],
+          process_list: [],
+        }),
+      },
+      {
+        path: 'system/Acme/machine/Cube.json',
+        text: JSON.stringify({ name: 'Cube', model_id: 'acme-cube', nozzle_diameter: '0.4' }),
+      },
+    ]);
+    expect(built.installed.boundModels.size).toBe(0);
+    expect(analyze(built).filter((f) => f.id.startsWith('device-profile:'))).toEqual([]);
   });
 });
 

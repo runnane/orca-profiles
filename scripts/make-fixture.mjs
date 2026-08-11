@@ -1005,8 +1005,25 @@ write('OrcaSlicer.conf', {
   access_code: { 'Workshop Cube': '00112233' },
   user_access_code: 'abcdef123456',
   dev_sn: { 'Workshop Cube': 'SNEXAMPLE0001' },
+  // Bound devices. Keyed by printer IP, with a device name and serial inside —
+  // which is why `redactConfJson` is an allowlist and why only the derived
+  // `printer_type` list ever leaves the server (ORCA-18). Three entries, one per
+  // outcome the `printers/` check has:
+  //
+  //  - `acme-cube` — Acme's `Acme Cube` model file states this `model_id`, and
+  //    `printers/acme-cube.json` exists below. Nothing reported.
+  //  - `globex-box` — Globex declares it, and there is no device profile. A sync
+  //    gap: the install has never opened that printer.
+  //  - `shed-special` — no installed vendor declares it, so it is a user-defined
+  //    machine and will never have one. Informational, not a fault.
+  //
+  // Two of them share an IP prefix and one repeats a model on a second address,
+  // so the dedupe in `boundPrinterTypes` has something to do.
   local_machines: {
-    '192.0.2.10': { dev_ip: '192.0.2.10', dev_name: 'Workshop Cube', printer_type: 'acme-cube' },
+    '192.0.2.10': { dev_ip: '192.0.2.10', dev_name: 'Workshop Cube', dev_id: '00M00A000000001', printer_type: 'acme-cube' },
+    '192.0.2.11': { dev_ip: '192.0.2.11', dev_name: 'Workshop Cube Two', dev_id: '00M00A000000002', printer_type: 'acme-cube' },
+    '192.0.2.12': { dev_ip: '192.0.2.12', dev_name: 'Back Room Box', dev_id: '00M00G000000003', printer_type: 'globex-box' },
+    '192.0.2.13': { dev_ip: '192.0.2.13', dev_name: 'Shed Machine', dev_id: '00M00S000000004', printer_type: 'shed-special' },
   },
   presets: { filament: 'Studio ABS', print: 'Fast Draft' },
   // The installed filaments — the `is_visible` gate. An array of names, which is
@@ -1033,3 +1050,18 @@ write('OrcaSlicer.conf', {
 });
 
 console.log(`fixture written to ${ROOT}`);
+
+// ─── the slicer's own downloaded device profiles ───────────────────────────
+// `printers/` is not user config: OrcaSlicer writes `<model_id>.json` here for
+// each model it has seen, and `load_compatible_settings` reads it when a bound
+// printer reports status (json_diff.cpp:92-107). Nothing in `src/` ever writes
+// it, so absent is the ordinary state — which is exactly why the check is gated
+// on the devices actually paired rather than on every model a vendor declares.
+//
+// Only `acme-cube` is here. `globex-box` and `shed-special` are bound above and
+// deliberately have no file.
+write('printers/acme-cube.json', {
+  name: 'Acme Cube',
+  printer_type: 'acme-cube',
+  version: '01.00.00.00',
+});
