@@ -452,7 +452,7 @@ export function notLoadedPresets(
     let changed = false;
     for (const p of active) {
       if (p.origin !== 'user' || out.has(p.id) || !p.inherits) continue;
-      if (firstLoadable(byName, out, p, p.kind, p.inherits).target) continue;
+      if (firstLoadable(byName, out, p, p.kind, p.inherits, 'inherits').target) continue;
       out.set(p.id, { reason: 'parent-not-loaded', parentName: p.inherits });
       changed = true;
     }
@@ -479,15 +479,21 @@ function firstLoadable(
   from: Preset,
   targetKind: PresetKind,
   name: string,
-): { ordered: Preset[]; target?: Preset } {
+  via: 'inherits' | 'other',
+): { inCollection: Preset[]; ordered: Preset[]; target?: Preset } {
   const claimed = (byName.get(name) ?? []).filter((c) => c.id !== from.id);
   const sameKind = claimed.filter((c) => c.kind === targetKind);
   // One `PresetCollection` holds the system bundles plus exactly one user folder
   // (PresetBundle.cpp:528), so a user preset in another profile is not a candidate
   // however right its name looks.
   const inCollection = sameKind.filter((c) => c.origin === 'system' || c.profile === from.profile);
-  const ordered = loadOrder(inCollection);
-  return { ordered, target: ordered.find((c) => !notLoaded.has(c.id)) };
+  // Three filters, and the order is the order the reasons get more specific in:
+  // in the collection at all, then reachable from this vendor's bundle, then
+  // actually loaded. A candidate that fails an earlier one should be described by
+  // that failure, not by a later one it never got to.
+  const inScope = via === 'inherits' ? inCollection.filter((c) => inheritsScope(from, c)) : inCollection;
+  const ordered = loadOrder(inScope);
+  return { inCollection, ordered, target: ordered.find((c) => !notLoaded.has(c.id)) };
 }
 
 /**
@@ -511,11 +517,14 @@ function firstLoadable(
  *  - `unloaded-profile` it exists, in a user folder the slicer does not load
  *                       (PresetBundle.cpp:528). Editing that file changes
  *                       nothing here.
- *  - `not-loaded`       it exists, in the folder the slicer *does* load, and the
- *                       slicer still skipped it — a `version` that does not parse,
- *                       or its own `inherits` failing. This is the one that reads
- *                       as "the file is right there", and `index.notLoaded` says
- *                       which gate it hit.
+ *  - `other-vendor`     **`inherits` only.** It exists, in another vendor's
+ *                       bundle, which this vendor's load cannot see. See
+ *                       `inheritsScope`.
+ *  - `not-loaded`       it exists, in the folder the slicer *does* load, is
+ *                       reachable, and the slicer still skipped it — a `version`
+ *                       that does not parse, or its own `inherits` failing. This is
+ *                       the one that reads as "the file is right there", and
+ *                       `index.notLoaded` says which gate it hit.
  *  - `absent`           nothing loadable claims the name.
  */
 export type ReferenceReason =
@@ -523,6 +532,7 @@ export type ReferenceReason =
   | 'shadowed'
   | 'wrong-kind'
   | 'unloaded-profile'
+  | 'other-vendor'
   | 'not-loaded'
   | 'absent';
 
@@ -562,23 +572,81 @@ export function genericAlias(name: string): string | undefined {
 }
 
 /**
+ * Which preset an `inherits` may name, as far as the *bundle* is concerned.
+ *
+ * This is the one reference key that is not resolved against the merged
+ * collections, and the difference is not cosmetic — a system preset whose parent
+ * cannot be found does not load, and takes its vendor's whole bundle with it.
+ *
+ * `parse_subfile` resolves `inherits` against, in order:
+ *
+ *  1. `config_maps` — **local to the vendor currently loading**, and cleared per
+ *     preset type (PresetBundle.cpp:4886-4888, :5117-5155).
+ *  2. `base_bundle->m_config_maps` — retained for **`OrcaFilamentLibrary` only**
+ *     (PresetBundle.cpp:4889-4897, and the `if (is_orca_lib)` assignment at
+ *     :5147-5151).
+ *
+ * and if neither has the name it returns `"Can not find inherits: " + inherits`
+ * (PresetBundle.cpp:4913-4916), which the caller raises as a `ConfigurationError`
+ * for that vendor's entire bundle (:5121-5130).
+ *
+ * The source says why that is safe to model as a hard boundary:
+ *
+ * > Separate ORCA_FILAMENT_LIBRARY from other vendors. It must be loaded first
+ * > because other vendors' filaments may inherit from it via the `base_bundle`
+ * > lookup in parse_subfile. **The remaining vendors are independent (no
+ * > cross-vendor inheritance)** and can be loaded in parallel.
+ * > — PresetBundle.cpp:2216-2219
+ *
+ * Two consequences that are easy to get wrong in the generous direction:
+ *
+ *  - The library exemption is **filaments only**. `m_config_maps` is assigned
+ *    straight after the filament loop and the maps are cleared per type
+ *    (:5133-5151), so the library can supply a filament base and nothing else —
+ *    a machine base has to come from the vendor's own bundle.
+ *  - The library itself is loaded with **no `base_bundle`** (:2231-2241), so its
+ *    presets can only inherit within it.
+ *
+ * A **user** preset is unaffected: it inherits inside its own `PresetCollection`,
+ * which holds every vendor's presets after the merge.
+ */
+function inheritsScope(from: Preset, candidate: Preset): boolean {
+  if (from.origin !== 'system') return true;
+  if (candidate.origin !== 'system') return false;
+  if (candidate.vendor === from.vendor) return true;
+  return (
+    candidate.vendor === FILAMENT_LIBRARY_VENDOR &&
+    from.vendor !== FILAMENT_LIBRARY_VENDOR &&
+    candidate.kind === 'filament'
+  );
+}
+
+/**
  * Resolve a reference from `from` to a preset of `targetKind` called `name`, and
  * say why the answer is what it is.
  *
  * Candidates come from `byName`, which excludes `_local/` sync snapshots: the
  * slicer never loads them, so one claiming a name does not make the name exist.
+ *
+ * `via` is the key being resolved, and it matters for exactly one thing: only
+ * `inherits` is resolved per vendor bundle. `compatible_printers` and the
+ * `default_*` keys are matched against the merged collections much later, so
+ * applying the bundle boundary to them would invent faults — a vendor filament
+ * naming another vendor's printer is ordinary. Defaults to the permissive
+ * reading, so a new call site cannot silently acquire the stricter rule.
  */
 export function classifyReference(
   index: ConfigIndex,
   from: Preset,
   targetKind: PresetKind,
   name: string,
+  via: 'inherits' | 'other' = 'other',
 ): ReferenceResolution {
   const claimed = (index.byName.get(name) ?? []).filter((c) => c.id !== from.id);
   if (claimed.length === 0) {
     const alias = genericAlias(name);
     if (alias) {
-      const viaAlias = classifyReference(index, from, targetKind, alias);
+      const viaAlias = classifyReference(index, from, targetKind, alias, via);
       if (viaAlias.target) return { ...viaAlias, viaAlias: alias };
     }
     return { reason: 'absent', others: [], arbitrary: false };
@@ -587,9 +655,22 @@ export function classifyReference(
   const sameKind = claimed.filter((c) => c.kind === targetKind);
   if (sameKind.length === 0) return { reason: 'wrong-kind', others: claimed, arbitrary: false };
 
-  const { ordered, target } = firstLoadable(index.byName, index.notLoaded, from, targetKind, name);
-  if (ordered.length === 0) {
+  const { inCollection, ordered, target } = firstLoadable(
+    index.byName,
+    index.notLoaded,
+    from,
+    targetKind,
+    name,
+    via,
+  );
+  if (inCollection.length === 0) {
     return { reason: 'unloaded-profile', others: sameKind, arbitrary: false };
+  }
+
+  // In the collection, but not in a bundle this preset's load can reach. Only
+  // `inherits` narrows this far — see `inheritsScope`.
+  if (ordered.length === 0) {
+    return { reason: 'other-vendor', others: inCollection, arbitrary: false };
   }
 
   // Every claimant the slicer could have reached, and it loaded none of them. The
@@ -611,7 +692,7 @@ export function classifyReference(
  * is skipped outright ("Preset already present, not loading", Preset.cpp:1619).
  */
 export function lookupParent(index: ConfigIndex, name: string, from: Preset): Preset | undefined {
-  return classifyReference(index, from, from.kind, name).target;
+  return classifyReference(index, from, from.kind, name, 'inherits').target;
 }
 
 /**

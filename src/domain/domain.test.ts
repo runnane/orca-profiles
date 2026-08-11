@@ -59,7 +59,10 @@ describe('index', () => {
     const s = stats(index);
     expect(s.user).toBeGreaterThan(5);
     expect(s.system).toBeGreaterThan(5);
-    expect(s.vendors).toBe(2);
+    // Acme, Globex, and OrcaFilamentLibrary — which is a vendor bundle like any
+    // other, and is counted as one.
+    expect(s.vendors).toBe(3);
+    expect(index.vendors).toContain('OrcaFilamentLibrary');
   });
 
   it('loads only the profile named by preset_folder', () => {
@@ -1969,6 +1972,157 @@ describe('active profile is read from OrcaSlicer.conf', () => {
   });
 });
 
+describe('a vendor inherits inside its own bundle', () => {
+  const findings = analyze(index);
+  const sys = (file: string) => {
+    const p = index.active.find((x) => x.path === file);
+    if (!p) throw new Error(`fixture missing: ${file}`);
+    return p;
+  };
+  const inherits = (from: ReturnType<typeof sys>, name: string) =>
+    classifyReference(index, from, from.kind, name, 'inherits');
+
+  it('resolves a same-vendor parent', () => {
+    // The control. This rule can turn a working chain into a reported fault, which
+    // is the failure mode ORCA-10 was written to avoid, so the passing cases carry
+    // as much weight as the failing one.
+    const r = inherits(sys('system/Acme/filament/Acme ABS @System.json'), 'fdm_filament_abs');
+    expect(r.reason).toBe('resolved');
+    expect(r.target?.vendor).toBe('Acme');
+  });
+
+  it('resolves a library parent from another vendor', () => {
+    // The one exemption. `OrcaFilamentLibrary` is loaded first, into the bundle every
+    // other vendor then gets as its `base_bundle` (PresetBundle.cpp:2216-2245).
+    const r = inherits(sys('system/Globex/filament/Globex PETG @System.json'), 'fdm_filament_common');
+    expect(r.reason).toBe('resolved');
+    expect(r.target?.vendor).toBe('OrcaFilamentLibrary');
+  });
+
+  it('refuses a cross-vendor parent that is not in the library', () => {
+    const globex = sys('system/Globex/filament/Globex ABS @System.json');
+    const r = inherits(globex, 'fdm_filament_abs');
+    expect(r.reason).toBe('other-vendor');
+    expect(r.target).toBeUndefined();
+    // The file it names is still reported, so the finding can say whose it is.
+    expect(r.others[0].vendor).toBe('Acme');
+    expect(lookupParent(index, 'fdm_filament_abs', globex)).toBeUndefined();
+  });
+
+  it('names the owning vendor, and says the whole bundle fails', () => {
+    const f = findings.filter((x) => x.id.startsWith('cross-vendor-inherits:'));
+    expect(f).toHaveLength(1);
+    expect(f[0].severity).toBe('high');
+    expect(f[0].title).toContain('Globex');
+    expect(f[0].title).toContain('Acme');
+    // Not "this preset is missing": the caller raises a ConfigurationError for the
+    // vendor's entire bundle, which is a much bigger claim and the actionable one.
+    expect(f[0].detail).toContain("Globex's entire bundle");
+    expect(f[0].detail).toContain('PresetBundle.cpp:2216-2219');
+    expect(f[0].reference?.unresolved[0].reason).toBe('other-vendor');
+  });
+
+  it('groups one finding per vendor, not one per preset', () => {
+    const built = buildIndex([
+      { path: 'system/Acme/filament/b.json', text: JSON.stringify({ name: 'acme_base', instantiation: 'false' }) },
+      { path: 'system/Globex/filament/x.json', text: JSON.stringify({ name: 'X', inherits: 'acme_base' }) },
+      { path: 'system/Globex/filament/y.json', text: JSON.stringify({ name: 'Y', inherits: 'acme_base' }) },
+    ]);
+    const f = analyze(built).filter((x) => x.id.startsWith('cross-vendor-inherits:'));
+    expect(f).toHaveLength(1);
+    expect(f[0].presetIds).toHaveLength(2);
+  });
+
+  it('does not let a non-filament reach the library', () => {
+    // `m_config_maps` is handed to the base bundle right after the *filament* loop
+    // and the maps are cleared per preset type (PresetBundle.cpp:5133-5151), so the
+    // shared bundle can carry a filament base and nothing else.
+    const built = buildIndex([
+      {
+        path: 'system/OrcaFilamentLibrary/machine/b.json',
+        text: JSON.stringify({ name: 'shared_machine_base', instantiation: 'false' }),
+      },
+      {
+        path: 'system/Acme/machine/x.json',
+        text: JSON.stringify({ name: 'X', inherits: 'shared_machine_base' }),
+      },
+    ]);
+    const from = built.active.find((p) => p.name === 'X')!;
+    expect(classifyReference(built, from, 'machine', 'shared_machine_base', 'inherits').reason).toBe(
+      'other-vendor',
+    );
+  });
+
+  it('does not let the library itself reach another vendor', () => {
+    // It is loaded with no `base_bundle` of its own (PresetBundle.cpp:2231-2241).
+    const built = buildIndex([
+      { path: 'system/Acme/filament/b.json', text: JSON.stringify({ name: 'acme_base', instantiation: 'false' }) },
+      {
+        path: 'system/OrcaFilamentLibrary/filament/x.json',
+        text: JSON.stringify({ name: 'Lib PLA', inherits: 'acme_base' }),
+      },
+    ]);
+    const from = built.active.find((p) => p.name === 'Lib PLA')!;
+    expect(classifyReference(built, from, 'filament', 'acme_base', 'inherits').reason).toBe(
+      'other-vendor',
+    );
+  });
+
+  it('does not apply the bundle boundary to a user preset', () => {
+    // A user preset inherits inside its own collection, which holds every vendor's
+    // presets after the merge. Scoping it would invent faults across the fixture.
+    const studio = sys('user/default/filament/Studio ABS.json');
+    expect(inherits(studio, 'Acme ABS @System').reason).toBe('resolved');
+    for (const p of index.active.filter((x) => x.origin === 'user' && x.inherits)) {
+      const r = classifyReference(index, p, p.kind, p.inherits as string, 'inherits');
+      expect(r.reason).not.toBe('other-vendor');
+    }
+  });
+
+  it('does not apply the bundle boundary to keys that are not `inherits`', () => {
+    // The guard that keeps this from inventing faults. `compatible_printers` and the
+    // `default_*` keys are matched against the merged collections long after the
+    // bundles are loaded, so a vendor naming another vendor's printer is ordinary —
+    // and `classifyReference` defaults to that permissive reading.
+    const built = buildIndex([
+      {
+        path: 'system/Acme/machine/p.json',
+        text: JSON.stringify({ name: 'Acme Cube 0.4 nozzle', instantiation: 'true' }),
+      },
+      {
+        path: 'system/Globex/filament/f.json',
+        text: JSON.stringify({
+          name: 'Globex PLA',
+          compatible_printers: ['Acme Cube 0.4 nozzle'],
+        }),
+      },
+    ]);
+    const from = built.active.find((p) => p.name === 'Globex PLA')!;
+    expect(classifyReference(built, from, 'machine', 'Acme Cube 0.4 nozzle').reason).toBe('resolved');
+    // And explicitly under the stricter reading it would not, which is why the
+    // parameter exists rather than the rule being global.
+    expect(
+      classifyReference(built, from, 'machine', 'Acme Cube 0.4 nozzle', 'inherits').reason,
+    ).toBe('other-vendor');
+  });
+
+  it('leaves the fixture’s two vendor machine bases unreported', () => {
+    // Acme and Globex each ship `fdm_machine_common` now, which they have to: the
+    // library cannot supply a machine base. A base never enters a collection
+    // (PresetBundle.cpp:4929), so this is not a duplicate name.
+    const both = index.active.filter((p) => p.name === 'fdm_machine_common');
+    expect(both).toHaveLength(2);
+    expect(new Set(both.map((p) => p.vendor))).toEqual(new Set(['Acme', 'Globex']));
+    expect(findings.filter((f) => f.kind === 'duplicate-name' && f.title.includes('fdm_machine_common'))).toEqual([]);
+  });
+
+  it('does not move the deepest chain', () => {
+    // The issue asked for this rather than assuming nothing else shifts: the
+    // fixture's deepest chain is a user process and is unaffected by a vendor rule.
+    expect(stats(index).deepestChain).toEqual({ name: '0.28mm Draft @Acme - Copy', depth: 5 });
+  });
+});
+
 describe('the dropdown’s own grouping', () => {
   // Modelled on `PlaterPresetComboBox::update` (v2.4.2 PresetComboBoxes.cpp), so
   // that the two lists can be read side by side rather than reconciled by eye.
@@ -2111,12 +2265,17 @@ describe('vendor bases are not presets you can pick', () => {
   const bases = index.active.filter((p) => !p.instantiable);
 
   it('flags exactly the `fdm_*` set in the fixture', () => {
-    expect(bases.map((p) => p.name).sort()).toEqual([
-      'fdm_filament_abs',
-      'fdm_filament_common',
-      'fdm_machine_common',
-      'fdm_process_acme_common',
-      'fdm_process_common',
+    // Keyed by vendor as well as name, because two vendors ship a
+    // `fdm_machine_common` and that is not a mistake: the shared bundle can only
+    // supply a *filament* base (PresetBundle.cpp:5147-5151), so each vendor needs
+    // its own machine base. A name-only assertion would read as a duplicate.
+    expect(bases.map((p) => `${p.vendor}/${p.name}`).sort()).toEqual([
+      'Acme/fdm_filament_abs',
+      'Acme/fdm_machine_common',
+      'Acme/fdm_process_acme_common',
+      'Acme/fdm_process_common',
+      'Globex/fdm_machine_common',
+      'OrcaFilamentLibrary/fdm_filament_common',
     ]);
     // The flag is on the preset, decided once in `buildIndex`, so nothing has to
     // re-derive it — and the `Template` exception exists in one place.
@@ -2128,8 +2287,8 @@ describe('vendor bases are not presets you can pick', () => {
     // Pinned against the fixture rather than left as "greater than 5": the whole
     // point is that a number moved, and a loose assertion would not have noticed.
     const s = stats(index);
-    expect(s.bases).toBe(5);
-    expect(s.system).toBe(index.active.filter((p) => p.origin === 'system').length - 5);
+    expect(s.bases).toBe(6);
+    expect(s.system).toBe(index.active.filter((p) => p.origin === 'system').length - 6);
     expect(s.system + s.bases + s.user).toBe(index.active.length);
     // `byKind` drives the sidebar's origin chips, so it has to agree.
     const kindTotal = Object.values(s.byKind).reduce((n, k) => n + k.system + k.user, 0);
