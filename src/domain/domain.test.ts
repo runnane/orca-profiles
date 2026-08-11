@@ -97,10 +97,15 @@ describe('index', () => {
     // (Preset.cpp:3869); they load first so others can inherit them.
     const roots = index.presets.filter((p) => p.isCustomRoot);
     expect(roots.length).toBeGreaterThan(0);
-    for (const r of roots) {
-      expect(r.path).toContain('/base/');
-      expect(r.inherits).toBeUndefined();
-    }
+    for (const r of roots) expect(r.path).toContain('/base/');
+    // `isCustomRoot` is "lives in `base/`", not "has no parent". That is nearly
+    // always the same thing, because detaching is what puts a preset there — but a
+    // hand-edited file can declare an `inherits` from inside `base/`, and the
+    // fixture holds one on purpose (ORCA-22). Asserting no root ever has a parent
+    // would make that shape unwritable.
+    expect(roots.filter((r) => r.inherits).map((r) => r.name)).toEqual([
+      'Bench Rig Base Derived',
+    ]);
   });
 
   it('separates active presets from sync snapshots', () => {
@@ -653,36 +658,53 @@ describe('a parent that exists as a file and is still not loadable', () => {
     expect(inheritanceChain(index, child).chain).toHaveLength(1);
   });
 
-  it('cascades to the grandchild', () => {
+  it('cascades to every child of the skipped base', () => {
     // A skipped preset is not in the collection, so its own children fail the same
-    // lookup. One pass over the config finds the child and misses this.
-    expect(index.notLoaded.get(child.id)).toEqual({
-      reason: 'parent-not-loaded',
-      parentName: 'Bench Rig Base',
-    });
+    // lookup. One pass over the config finds the first and misses the rest.
+    for (const p of [child, sibling]) {
+      expect(index.notLoaded.get(p.id)).toEqual({
+        reason: 'parent-not-loaded',
+        parentName: 'Bench Rig Base',
+      });
+    }
+  });
+
+  it('does not cascade a second level, because a second level cannot exist', () => {
+    // `Bench Rig A Fine` names `Bench Rig A`, its sibling in the same directory —
+    // which the slicer never resolves whatever happened to `Bench Rig A` itself
+    // (ORCA-22). So the cascade is exactly one level deep for user presets: a
+    // `<kind>/base/` parent and its `<kind>/` children, and no further.
     expect(index.notLoaded.get(grandchild.id)).toEqual({
       reason: 'parent-not-loaded',
       parentName: 'Bench Rig A',
     });
+    expect(classifyReference(index, grandchild, 'machine', 'Bench Rig A', 'inherits').reason).toBe(
+      'same-directory',
+    );
   });
 
   it('reports broken-parent on the child and on the cascade', () => {
-    for (const p of [child, sibling, grandchild]) {
+    for (const p of [child, sibling]) {
       const broken = of(p.id).filter((f) => f.kind === 'broken-parent');
       expect(broken).toHaveLength(1);
       expect(broken[0].reference?.unresolved[0].reason).toBe('not-loaded');
     }
+    // The sibling-in-the-same-folder case is a different rule and says so.
+    const g = of(grandchild.id).filter((f) => f.kind === 'broken-parent');
+    expect(g).toHaveLength(1);
+    expect(g[0].reference?.unresolved[0].reason).toBe('same-directory');
   });
 
   it('says which gate the parent hit, differently for each', () => {
     const direct = of(child.id).find((f) => f.kind === 'broken-parent')!;
     expect(direct.detail).toContain('`version` does not parse');
     expect(direct.detail).toContain('Preset.cpp:1653-1655');
-    // The grandchild's parent failed for a different reason and needs a different
-    // fix — fix the top of the chain, not this file.
-    const cascaded = of(grandchild.id).find((f) => f.kind === 'broken-parent')!;
-    expect(cascaded.detail).toContain('its own `inherits`');
-    expect(cascaded.detail).toContain('from the top down');
+    // The other one failed for a different reason and needs a different fix —
+    // move the parent, rather than repair it.
+    const sameDir = of(grandchild.id).find((f) => f.kind === 'broken-parent')!;
+    expect(sameDir.detail).toContain('same pass');
+    expect(sameDir.detail).toContain('user/default/machine/base/');
+    expect(sameDir.detail).not.toContain('`version` does not parse');
   });
 
   it('reports the unloadable parent itself, with the fix', () => {
@@ -786,22 +808,55 @@ describe('inheritance graph', () => {
     const e = edgeFrom('Studio Base Fine.json');
     expect(e?.resolved).toBe(true);
     expect(e?.parentId).toBe('user/default/process/base/Studio Base.json');
-    expect(e?.ambiguous).toBe(true);
-    // And the file that lost is in the graph, marked dead rather than omitted.
+    // **Not** ambiguous, which changed with ORCA-22 and is the sharper answer.
+    // The other claimant sits in `Studio Base Fine`'s own directory, so it was
+    // never a candidate for *this* edge — the child could only ever have reached
+    // the `base/` copy. The edge is no longer described as a coin toss that
+    // happened to land right.
+    expect(e?.ambiguous).toBe(false);
+    // The name clash is still real, and still reported: when the folder pass runs,
+    // `base/Studio Base` is already in the collection, so the folder file is
+    // skipped with "Preset already present, not loading" (Preset.cpp:1617-1620).
+    // Two different questions — "which file is dead" and "was this edge a guess".
     expect(node('user/default/process/Studio Base.json').shadowed).toBe(true);
     expect(node('process/base/Studio Base.json').shadowed).toBe(false);
+    expect(index.notLoaded.get('user/default/process/Studio Base.json')?.reason).toBe('name-clash');
   });
 
-  it('draws a loop as a marked back edge instead of following it', () => {
+  it('draws a hand-written loop as two unresolved edges, because it is not a loop', () => {
+    // It used to draw as a pair of back edges. Since ORCA-22 it does not, and that
+    // is the truer picture: `Loop A` and `Loop B` are in one directory, so each is
+    // loaded in the same pass as the one it names and neither lookup ever finds
+    // the other. The slicer skips both, separately, and there is no cycle to draw.
     const a = edgeFrom('Loop A.json');
     const b = edgeFrom('Loop B.json');
-    expect(a?.back).toBe(true);
-    expect(b?.back).toBe(true);
+    for (const e of [a, b]) {
+      expect(e?.resolved).toBe(false);
+      expect(e?.back).toBe(false);
+      expect(e?.reason).toBe('same-directory');
+    }
     // Both presets are still in the graph: dropping them would hide the fault.
     expect(node('Loop A.json')).toBeDefined();
     expect(node('Loop B.json')).toBeDefined();
+    expect(node('Loop A.json').shadowed).toBe(true);
     // …and the walk terminated, which is the whole reason for the visited set.
     expect(new Set(g.nodes.map((n) => n.id)).size).toBe(g.nodes.length);
+  });
+
+  it('still marks a back edge where one can actually occur', () => {
+    // The cycle guard is not dead code just because a *user* loop is impossible.
+    // Within one vendor bundle we deliberately do not model `config_maps` build
+    // order (`parse_subfile` fills it as the vendor's own list is walked), so two
+    // presets in one bundle naming each other do resolve here — and the graph must
+    // still close the loop with a marked edge rather than walking it forever.
+    const built = buildIndex([
+      { path: 'system/Acme/process/a.json', text: JSON.stringify({ name: 'Ring A', inherits: 'Ring B' }) },
+      { path: 'system/Acme/process/b.json', text: JSON.stringify({ name: 'Ring B', inherits: 'Ring A' }) },
+    ]);
+    const ring = buildGraph(built, { includeSystemOnly: true });
+    expect(ring.edges).toHaveLength(2);
+    expect(ring.edges.every((e) => e.back)).toBe(true);
+    expect(new Set(ring.nodes.map((n) => n.id)).size).toBe(2);
   });
 
   it('marks an ordinary edge as neither back nor ambiguous', () => {
@@ -2369,6 +2424,144 @@ describe('the printer_model / printer_variant guards read the chain', () => {
     // have caught the 28 false positives: it counts them rather than describing
     // them.
     expect(findings.filter((f) => f.id.startsWith('printer-variant:'))).toEqual([]);
+  });
+});
+
+describe('a user preset cannot inherit from a sibling in its own directory', () => {
+  // ORCA-22. `load_presets` collects a directory into a **local** deque
+  // (Preset.cpp:1609) and merges it into the collection only after the whole
+  // directory has been walked (:1764-1765), while the `inherits` lookup is a binary
+  // search over the already-merged collection (`find_preset2` → `find_preset` →
+  // `find_preset_internal`, :3229, :3211-3213). So nothing loaded in the current
+  // pass is visible, and an `inherits` can only reach an *earlier* pass.
+  //
+  // This is the rule that can invent faults, so the passing cases below carry as
+  // much weight as the failing ones.
+  const findings = analyze(index);
+  const inherits = (p: ReturnType<typeof byFile>, name: string) =>
+    classifyReference(index, p, p.kind, name, 'inherits');
+  const of = (id: string) => findings.filter((f) => f.presetIds.includes(id));
+
+  it('still resolves a `base/` root from the folder proper', () => {
+    // The control that matters most. `base/` is a separate, *completed* recursive
+    // call made before the folder is read (Preset.cpp:1583-1586), so it is an
+    // earlier pass and must keep working. Break this and the rule empties configs.
+    const child = byFile('machine/Bench Rig C.json');
+    const r = inherits(child, 'Bench Rig Base OK');
+    expect(r.reason).toBe('resolved');
+    expect(r.target?.path).toBe('user/default/machine/base/Bench Rig Base OK.json');
+    expect(index.notLoaded.has(child.id)).toBe(false);
+    expect(resolve(index, child).chain).toHaveLength(2);
+  });
+
+  it('still resolves a system parent from anywhere', () => {
+    // The system bundles are merged before any user folder is read, so they are
+    // always an earlier pass.
+    const studio = byFile('user/default/filament/Studio ABS.json');
+    expect(inherits(studio, 'Acme ABS @System').reason).toBe('resolved');
+    // And nothing in the fixture that reaches a system parent broke. `shadowed`
+    // counts as reaching it — it means the name resolved *and* other files claim
+    // it, which is the two-vendors-one-name shape and not a failure.
+    for (const p of index.active) {
+      if (p.origin !== 'user' || !p.inherits) continue;
+      const r = inherits(p, p.inherits);
+      if (r.target?.origin === 'system') expect(['resolved', 'shadowed']).toContain(r.reason);
+    }
+  });
+
+  it('refuses a sibling in the same directory, and names the rule', () => {
+    const fine = byFile('machine/Bench Rig A Fine.json');
+    const r = inherits(fine, 'Bench Rig A');
+    expect(r.reason).toBe('same-directory');
+    expect(r.target).toBeUndefined();
+    // The file it names is still reported, so the finding can point at it.
+    expect(r.others.map((o) => o.path)).toContain('user/default/machine/Bench Rig A.json');
+    // "absent" would send someone looking for a file that is right there.
+    const f = of(fine.id).find((x) => x.kind === 'broken-parent')!;
+    expect(f.detail).toContain('same pass');
+    expect(f.detail).toContain('Preset.cpp:1609');
+    expect(f.detail).not.toContain('not installed');
+  });
+
+  it('refuses one `base/` preset naming another', () => {
+    // `base/` is one pass of its own, so the rule applies inside it too — the case
+    // that looks like it should work, because `base/` is "loaded first".
+    const derived = byFile('machine/base/Bench Rig Base Derived.json');
+    expect(derived.isCustomRoot).toBe(true);
+    expect(inherits(derived, 'Bench Rig Base Shared').reason).toBe('same-directory');
+    expect(index.notLoaded.get(derived.id)).toEqual({
+      reason: 'parent-not-loaded',
+      parentName: 'Bench Rig Base Shared',
+    });
+    // …and the one it names is untouched, since it has no parent of its own.
+    expect(index.notLoaded.has(byFile('machine/base/Bench Rig Base Shared.json').id)).toBe(false);
+  });
+
+  it('does not let a `base/` preset reach the folder proper', () => {
+    // The other direction, and why this is `isCustomRoot` rather than a directory
+    // comparison: `base/` runs *before* the folder, so a `base/` preset naming a
+    // folder preset is naming a **later** pass. Comparing directories alone would
+    // resolve it — and a config could then describe a cycle the slicer cannot have.
+    const built = buildIndex([
+      {
+        path: 'user/default/process/base/root.json',
+        text: JSON.stringify({ name: 'Root', version: '2.4.0.3', inherits: 'Leaf' }),
+      },
+      {
+        path: 'user/default/process/leaf.json',
+        text: JSON.stringify({ name: 'Leaf', version: '2.4.0.3' }),
+      },
+    ]);
+    const root = built.active.find((p) => p.name === 'Root')!;
+    expect(classifyReference(built, root, 'process', 'Leaf', 'inherits').reason).toBe(
+      'same-directory',
+    );
+  });
+
+  it('makes a user-to-user loop impossible', () => {
+    // Every user edge runs from a later pass to an earlier one, so no chain of them
+    // returns. `Loop A` and `Loop B` are a hand-written cycle, and the slicer sees
+    // two independently broken files rather than a loop.
+    for (const name of ['Loop A', 'Loop B']) {
+      const p = byFile(`process/${name}.json`);
+      expect(inherits(p, p.inherits as string).reason).toBe('same-directory');
+      expect(resolve(index, p).circular).toBe(false);
+      expect(index.notLoaded.get(p.id)?.reason).toBe('parent-not-loaded');
+    }
+    // No user chain in the whole fixture reports as circular any more.
+    expect(index.active.filter((p) => p.origin === 'user' && resolve(index, p).circular)).toEqual(
+      [],
+    );
+  });
+
+  it('leaves keys that are not `inherits` alone', () => {
+    // The guard against the rule leaking. `compatible_printers` and the `default_*`
+    // keys are matched against the merged collections long after every pass is
+    // done, so a preset naming a sibling there is ordinary — and `classifyReference`
+    // defaults to that permissive reading.
+    const built = buildIndex([
+      {
+        path: 'user/default/machine/m.json',
+        text: JSON.stringify({ name: 'Shop One', version: '2.4.0.3' }),
+      },
+      {
+        path: 'user/default/filament/f.json',
+        text: JSON.stringify({
+          name: 'Mine',
+          version: '2.4.0.3',
+          compatible_printers: ['Shop One'],
+        }),
+      },
+    ]);
+    const f = built.active.find((p) => p.name === 'Mine')!;
+    expect(classifyReference(built, f, 'machine', 'Shop One').reason).toBe('resolved');
+  });
+
+  it('does not move the deepest chain', () => {
+    // The issue asked for this rather than assuming nothing else shifts. The
+    // fixture's deepest chain runs through system presets, which the rule does not
+    // touch — a user chain is now at most `<kind>/` → `<kind>/base/` deep.
+    expect(stats(index).deepestChain).toEqual({ name: '0.28mm Draft @Acme - Copy', depth: 5 });
   });
 });
 

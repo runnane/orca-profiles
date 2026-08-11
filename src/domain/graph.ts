@@ -178,7 +178,11 @@ export function buildGraph(index: ConfigIndex, opts: GraphOptions = {}): Inherit
     });
 
     if (p.inherits) {
-      const r = classifyReference(index, p, p.kind, p.inherits);
+      // `'inherits'` matters: the edge's `parentId` comes from `lookupParent`,
+      // which resolves under the stricter per-bundle and per-pass rules, so
+      // classifying the same name permissively here produced an edge whose reason
+      // contradicted its own `resolved` flag.
+      const r = classifyReference(index, p, p.kind, p.inherits, 'inherits');
       edges.push({
         childId: p.id,
         parentId: parentIncluded?.id,
