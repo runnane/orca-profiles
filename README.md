@@ -593,7 +593,7 @@ inside. A key that is itself the secret cannot be scrubbed by blanking values.
 This was found by diffing a real config against what the API returned; a fixture
 with blank credentials had reported it clean.
 
-Three fields are served: `app.preset_folder` (which profile is live), `filaments`
+Four fields are served: `app.preset_folder` (which profile is live), `filaments`
 and `models` (the installed gate above — preset and model names the `system/`
 files already carry). Each is **rebuilt field by field rather than forwarded**, so
 a key sitting next to one of them inside its own object cannot ride along, and
@@ -601,6 +601,21 @@ a key sitting next to one of them inside its own object cannot ride along, and
 section that could not be read is **omitted, never emitted empty** — an empty
 `filaments` is the claim "nothing is installed", and manufacturing that claim out
 of a parse failure would empty every list in the app.
+
+The fourth is `bound_models`, and it is the one that deserves its own sentence
+because it is a **derivation, not a field**. The real conf holds `local_machines`,
+a map keyed by printer IP whose entries carry `dev_id`, `dev_name`, `dev_ip` and
+`printer_type`. Only the `printer_type` values leave — deduped, sorted, keys
+discarded unread — because that list is what makes the "no device profile
+downloaded for this printer" check honest rather than noise, and nothing else in
+that map is needed for it. It is written as a projection rather than a filter on
+purpose: deleting the fields you can think of from a forwarded object leaves the
+next one riding along, which is the whole reason this file is an allowlist.
+
+`verify-deploy` asserts the shape, and that check is load-bearing in a way the
+address regexes are not: swap the projection for a delete-the-obvious-keys filter
+and it reports `bound_models is not a list of model ids` immediately, while an IP
+regex tuned to private ranges can miss a config whose addresses are not in them.
 
 ## Deploying
 

@@ -77,12 +77,12 @@ async function main() {
     ? ok('no value survives under any credential-bearing key')
     : bad(`${leaked} credential value(s) present in the payload`);
 
-  // 5. OrcaSlicer.conf reduced to its allowlisted shape: three fields, and each
-  //    rebuilt rather than forwarded. The per-entry check on `models` is the one
-  //    that matters most — an entry passed through whole would carry whatever the
-  //    real conf keeps beside the three fields the slicer reads, and the top-level
-  //    key check alone would not notice.
-  const CONF_KEYS = ['app', 'filaments', 'models'];
+  // 5. OrcaSlicer.conf reduced to its allowlisted shape: four fields, and each
+  //    rebuilt rather than forwarded. The per-entry checks are the ones that
+  //    matter most — an entry passed through whole would carry whatever the real
+  //    conf keeps beside the fields the slicer reads, and the top-level key check
+  //    alone would not notice.
+  const CONF_KEYS = ['app', 'filaments', 'models', 'bound_models'];
   const MODEL_KEYS = ['vendor', 'model', 'nozzle_diameter'];
   const conf = files.find((f) => f.path === 'OrcaSlicer.conf');
   if (conf) {
@@ -110,6 +110,17 @@ async function main() {
     strayModelKeys.length === 0
       ? ok(`installed models served as ${models.length} entry(ies), three fields each`)
       : bad(`models entries carry unallowlisted fields: ${strayModelKeys.join(', ')}`);
+
+    // `bound_models` is derived from `local_machines`, which is keyed by printer
+    // IP and carries device names and serials. A list of bare strings is the only
+    // acceptable shape — anything object-shaped means the map was forwarded with
+    // fields deleted rather than projected, which is the failure this is for.
+    const bound = parsed.bound_models;
+    if (bound !== undefined) {
+      Array.isArray(bound) && bound.every((m) => typeof m === 'string')
+        ? ok(`bound printer models served as ${bound.length} model id(s), nothing else`)
+        : bad(`bound_models is not a list of model ids: ${JSON.stringify(bound).slice(0, 120)}`);
+    }
   }
 
   // 6. No address-shaped strings anywhere. Catches a key that IS the secret,

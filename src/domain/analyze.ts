@@ -47,11 +47,13 @@ import {
   loadOrder,
   notLoadedIds,
   tieIsArbitrary,
+  loadedVendorModels,
   type BundleGuard,
   type ConfigIndex,
   type LoadFailure,
   type ReferenceReason,
   type VendorBundleFailure,
+  type VendorModel,
 } from './index-config';
 import { declaredVersion } from './preset-version';
 import { presetReferences } from './references';
@@ -254,6 +256,7 @@ export function analyze(index: ConfigIndex): Finding[] {
   findings.push(...referenceFindings(index, userPresets, shadowed, label));
   findings.push(...vendorIndexFindings(index));
   findings.push(...bundleFailureFindings(index));
+  findings.push(...deviceProfileFindings(index));
 
   // A name has to be unique inside the scope the slicer keeps it in — one user
   // profile, or every vendor at once. `clashScope` is that rule; across *profiles*
@@ -524,6 +527,68 @@ function vendorIndexFindings(index: ConfigIndex): Finding[] {
         unresolved: [{ name: ref.name, reason: 'absent' }],
       },
       weight: isModel ? 880 : 450,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * A printer you have paired that has no device profile downloaded.
+ *
+ * `load_compatible_settings` reads `data_dir()/printers/<printer_type>.json` and
+ * logs an error when it is not there (json_diff.cpp:92-107). `printer_type` is a
+ * **bound device's** `model_id` (`MachineObject::printer_type`,
+ * DeviceManager.hpp:201) — never a preset's — which is why this is gated on
+ * `installed.boundModels` rather than run over every model a vendor declares.
+ * Ungated it would fire for most models on any install, and be wrong for any
+ * printer that does not speak the Bambu protocol.
+ *
+ * **The consequence is small and is stated small.** A missing file leaves
+ * `settings_base` cleared (json_diff.cpp:91, :112), which is only the base that
+ * incremental device push messages are merged against. Host upload,
+ * `compatible_printers` and preset resolution are untouched. The issue that asked
+ * for this said it "costs the network/device features … silently"; reading the
+ * source says otherwise, and the finding says what the source says.
+ *
+ * Two shapes, and only one of them is a fault:
+ *
+ *  - a model **some vendor declares** — the install has simply never downloaded
+ *    that profile. A sync gap, worth fixing, `low`.
+ *  - a model **no vendor declares** — a user-defined printer, which by
+ *    construction will never have one. Reported as informational, because telling
+ *    someone to fix the unfixable is worse than saying nothing.
+ *
+ * Nothing is reported at all when `printers/` is empty *and* nothing is bound:
+ * absent is the ordinary state for a directory nothing in `src/` ever writes.
+ */
+function deviceProfileFindings(index: ConfigIndex): Finding[] {
+  const out: Finding[] = [];
+  const declared = new Map<string, VendorModel>();
+  for (const m of loadedVendorModels(index)) {
+    if (m.modelId !== '') declared.set(m.modelId, m);
+  }
+
+  for (const modelId of [...index.installed.boundModels].sort()) {
+    if (index.deviceProfiles.has(modelId)) continue;
+    const vendorModel = declared.get(modelId);
+    out.push({
+      id: `device-profile:${modelId}`,
+      severity: 'low',
+      kind: 'missing-reference',
+      title: vendorModel
+        ? `No device profile downloaded for ${vendorModel.vendor}'s "${vendorModel.id}"`
+        : `"${modelId}" is a printer model no installed vendor declares`,
+      detail: vendorModel
+        ? `A printer of this model is paired with this install, and there is no \`printers/${modelId}.json\`. OrcaSlicer reads that file when a bound printer reports its status — \`load_compatible_settings\`, json_diff.cpp:92-107 — and logs an error when it is absent. The effect is narrow: \`settings_base\` is left cleared (:91, :112), which is only the base that incremental status messages are merged against, so host upload, \`compatible_printers\` and preset resolution are unaffected. Opening this printer in the slicer once is normally enough to fetch it.`
+        : `A printer reporting itself as "${modelId}" is paired with this install, and no installed vendor declares that model — so it is a user-defined printer, and there will never be a \`printers/${modelId}.json\` for it. Nothing is wrong: this is what a self-defined machine looks like. It is here so that the missing file is not mistaken for a sync problem.`,
+      presetIds: [],
+      paths: [`printers/${modelId}.json`],
+      reference: {
+        key: 'printer_type',
+        unresolved: [{ name: modelId, reason: 'absent' }],
+      },
+      weight: vendorModel ? 60 : 10,
     });
   }
 

@@ -127,7 +127,7 @@ export function redactPresetJson(text: string): string {
  * cannot be caught by scrubbing values, and the shape can change between
  * releases — so guessing at what is dangerous is the wrong way round.
  *
- * The app needs three things out of this file, and takes only those three:
+ * The app needs four things out of this file, and takes only those four:
  *
  *  - `app.preset_folder` — which user profile is live.
  *  - `filaments` — the installed filament presets, which is half of the
@@ -136,6 +136,20 @@ export function redactPresetJson(text: string): string {
  *  - `models` — the installed printer model/variant list, the other half. Vendor
  *    ids, model ids and nozzle diameters, likewise already public product data
  *    present in `system/`.
+ *  - `bound_models` — the **model ids** of the printers this install has actually
+ *    paired with, derived from `local_machines[*].printer_type` (ORCA-18). This
+ *    one is a widening of the allowlist and was the owner's call, so what it is
+ *    and is not deserves saying precisely. `local_machines` is keyed by printer
+ *    IP and each entry carries `dev_id`, `dev_name`, `dev_ip` and `printer_type`
+ *    (DevManager.cpp:51-62). **Only `printer_type` leaves**, as a bare deduped
+ *    list with the keys thrown away — no address, no serial, no device name, and
+ *    nothing that says how many devices there are beyond how many distinct models
+ *    they are. A model id is public product data already present in `system/`.
+ *
+ *    It is needed because the `printers/` check is only honest when gated: the
+ *    lookup that fails is keyed by a **bound device's** model id, not by any
+ *    preset, so checking every declared vendor model instead would fire for most
+ *    models on any install and be wrong for any non-Bambu printer.
  *
  * Each is **rebuilt from parsed values rather than passed through**, field by
  * field and type by type, so a key that happens to sit next to one of them —
@@ -162,10 +176,12 @@ export function redactConfJson(text: string): string {
     const presetFolder = typeof app.preset_folder === 'string' ? app.preset_folder : '';
     const filaments = installedFilamentNames(parsed?.filaments);
     const models = installedModels(parsed?.models);
+    const boundModels = boundPrinterTypes(parsed?.local_machines);
     return JSON.stringify({
       app: { preset_folder: presetFolder },
       ...(filaments ? { filaments } : {}),
       ...(models ? { models } : {}),
+      ...(boundModels ? { bound_models: boundModels } : {}),
     });
   } catch {
     return JSON.stringify({ app: { preset_folder: '' } });
@@ -216,4 +232,33 @@ function installedModels(
     });
   }
   return out;
+}
+
+/**
+ * The model ids of the printers this install has paired with, and nothing else.
+ *
+ * The most dangerous object in the file goes in and a list of strings comes out.
+ * `local_machines` is keyed by printer IP address, and each value carries
+ * `dev_id`, `dev_name`, `dev_ip` and `printer_type` (DevManager.cpp:51-62) — so
+ * this is written as a **projection, never a filter**: the keys are discarded
+ * without being read, and exactly one field is copied out of each value. Deleting
+ * fields from a forwarded object would leave a future sibling key riding along,
+ * which is the failure mode an allowlist exists to prevent.
+ *
+ * Deduped and sorted, so the payload says which *models* are bound and not how
+ * many devices there are or in what order they were paired.
+ *
+ * Absent or unreadable yields `undefined`, so the field is omitted rather than
+ * emitted empty — the same rule as `filaments`. An empty list is the claim "no
+ * printers are paired", and the reader acts on it by reporting nothing at all.
+ */
+function boundPrinterTypes(value: unknown): string[] | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const out = new Set<string>();
+  for (const entry of Object.values(value as Record<string, unknown>)) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const t = (entry as Record<string, unknown>).printer_type;
+    if (typeof t === 'string' && t.trim() !== '') out.add(t.trim());
+  }
+  return [...out].sort();
 }

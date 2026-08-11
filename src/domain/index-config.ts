@@ -82,7 +82,15 @@ export interface VendorRef {
  */
 export interface VendorModel {
   vendor: string;
+  /** The `machine_model_list` entry name, which `printer_model` is matched against. */
   id: string;
+  /**
+   * The model file's own `model_id` — a different string from `id`, and the one a
+   * *device* is identified by. `BBL_JSON_KEY_MODEL_ID` → `model.model_id`
+   * (PresetBundle.cpp:4735-4737), against `model.id = machine_model.first` (:4718).
+   * Empty when the file states none, or could not be read.
+   */
+  modelId: string;
   path: string;
   present: boolean;
   variants: string[];
@@ -115,6 +123,16 @@ export interface ConfigIndex {
   vendorRefs: VendorRef[];
   /** Printer models declared by the vendor indexes. */
   vendorModels: VendorModel[];
+  /**
+   * Model ids with a device profile in `printers/`.
+   *
+   * The slicer's own downloaded resource directory, not user config: it holds
+   * `<model_id>.json` per model the install has seen, and `load_compatible_settings`
+   * reads `data_dir()/printers/<printer_type>.json` for a **bound device**
+   * (json_diff.cpp:92-107). Nothing in `src/` ever writes it, so absent is the
+   * ordinary state and only a paired printer makes it matter. See ORCA-18.
+   */
+  deviceProfiles: Set<string>;
   /**
    * Vendors whose entire bundle fails to load, keyed by vendor directory name.
    *
@@ -174,6 +192,16 @@ function readList(text: string, key: string): string[] {
     return [];
   } catch {
     return [];
+  }
+}
+
+/** A plain string field out of a printer model file. */
+function readString(text: string, key: string): string {
+  try {
+    const v = (JSON.parse(text) as Record<string, unknown>)[key];
+    return typeof v === 'string' ? v.trim() : '';
+  } catch {
+    return '';
   }
 }
 
@@ -279,6 +307,7 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
           id: entry.name,
           path: target,
           present: file !== undefined,
+          modelId: file ? readString(file.text, 'model_id') : '',
           variants: file ? readVariants(file.text) : [],
           defaultMaterials: file ? readList(file.text, 'default_materials') : [],
         });
@@ -362,6 +391,12 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
     else byName.set(p.name, [p]);
   }
 
+  const deviceProfiles = new Set<string>();
+  for (const f of files) {
+    const m = /^printers\/([^/]+)\.json$/.exec(normalisePath(f.path));
+    if (m) deviceProfiles.add(m[1]);
+  }
+
   const active = presets.filter((p) => p.scope === 'active');
   const failedVendors = failedVendorBundles(active, byName, vendorModels, vendorRefs);
 
@@ -381,6 +416,7 @@ export function buildIndex(files: ConfigFile[]): ConfigIndex {
     vendors: [...vendors].sort(),
     vendorRefs,
     vendorModels,
+    deviceProfiles,
     failedVendors,
     notLoaded: notLoadedPresets(active, byName, failedVendors),
     installed: readInstalled(files),
