@@ -1,0 +1,16 @@
+{
+  "repo": "runnane/orca-profiles",
+  "trackerKey": "ORCA",
+  "trackerSlug": "orca-profiles",
+  "visibility": "public",
+  "gates": {
+    "all": "pnpm gates"
+  },
+  "release": "none",
+  "ci": "github-hosted",
+  "liveBoundary": "rsync-deploy",
+  "worktreeSafe": true,
+  "deepDives": ".agents/",
+  "gatesDoc": ".agents/gates.md",
+  "userspaceBundle": "github:runnane/agent-userspace"
+}

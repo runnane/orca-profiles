@@ -7,12 +7,12 @@ imported below so they load every session.
 
 On-demand references — open the relevant one when the work matches:
 
-- `.claude/commands/local/gates.md` — the exact gate command, the two suites
+- `.agents/gates.md` — the exact gate command, the two suites
   deliberately outside it, CI, and the traps that make a green run mean less
   than it looks.
-- `.claude/commands/shared/pr-hygiene.md` — branch/PR/tracker rules.
-- `.claude/commands/shared/gate-failures.md` — what to do when a gate goes red.
-- `.claude/commands/shared/agent-isolation.md` — one checkout one agent; commit
+- The `pr-hygiene`, `gate-failures` and `agent-isolation` **skills** come from
+  the userspace bundle and load on their own; the copies that used to sit in
+  `.claude/commands/shared/` were deleted by ORCA-31. One checkout one agent; commit
   only where you were invoked.
 
 Two things worth loading into your head before touching this code:

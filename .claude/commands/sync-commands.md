@@ -1,5 +1,11 @@
 ---
-description: Reconcile .claude/commands/ against the sibling repos — verify the byte-identical shared core, decide each divergence.
+description: > **SUPERSEDED — do not run this without reading RCP-887 first.** RCP-878 replaced the
+> copy-between-repos model with one userspace bundle plus a per-repo `.agents/repo.json`,
+> and ORCA-31 deleted this repo's `.claude/commands/shared/*`, its `local/gates.md` and
+> the five hoisted command bodies. **The tier this command measures no longer exists
+> here**, so its `sha256sum` check cannot resolve. Retiring this file is **RCP-887**.
+
+Reconcile .claude/commands/ against the sibling repos — verify the byte-identical shared core, decide each divergence.
 ---
 
 This repo is part of the agent-tooling sync set. **The set is enumerated in one
