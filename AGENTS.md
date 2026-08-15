@@ -78,7 +78,7 @@ Node ≥ 22, pnpm pinned by `packageManager`.
   `redactConfJson` rather than a copy of it.
 - **Branch → commit → PR, always from fresh `main`.** One issue → one PR → one
   merge. `--base main` explicitly. See
-  [`shared/pr-hygiene.md`](.claude/commands/shared/pr-hygiene.md).
+  the bundle's `pr-hygiene` skill.
 - **Follow-ups become issues — never inline TODO text.** File them in the ORCA
   project with `issues_create_issue`, dedupe with a search first, and reference
   the key.
@@ -115,14 +115,29 @@ The MCP connection needs `.mcp.json`, which is **not committed** (it names
 internal infrastructure and this repo is public). Copy it from a sibling repo
 locally; it reads `RESPAWN_MCP_TOKEN` from the environment.
 
-## Agent tooling
+## How agent instructions reach this repo
 
-`.claude/commands/` follows the same three-tier split as the sibling repos:
+Ten repos run the same agent workflow against one tracker and one PR webhook.
+They used to do it by copying `.claude/commands/` between each other, which
+drifted measurably; RCP-878 replaced that with one bundle plus one manifest per
+repo, and ORCA-31 adopted it here. There is nothing left to sync and no
+`sha256sum` check to run.
 
-- **`shared/*.md` — byte-identical across the agent-tooling sync set**, verified
-  with `sha256sum`. Never edit one here alone; a shared file changed in one repo
-  is the bug. That includes a formatter reaching `.claude/**`.
-- **`local/gates.md` — this repo's own.** The exact gate command, the two suites
-  deliberately outside it, the CI reality, and the traps. A difference from a
-  sibling's copy is not drift.
-- **Command bodies stay repo-flavoured** and point at both on demand.
+- **The bundle** — `runnane/agent-userspace`: the constitution, the
+  repo-agnostic workflow commands (`/fix`, `/auto`, `/plan`, `/research`,
+  `/sweep`), and the `pr-hygiene`, `gate-failures` and `agent-isolation` skills.
+- **[`.agents/repo.json`](.agents/repo.json)** — the facts that differ between
+  repos: the gate command, `release`, `ci`, `liveBoundary`, `worktreeSafe`,
+  `gatesDoc`. **A manifest field cannot be wrong the way copied prose can**,
+  because the repo that owns the fact is the repo that writes it.
+- **[`.agents/gates.md`](.agents/gates.md)** — this repo's gate particulars,
+  including the two suites deliberately kept outside the gates.
+- **What stays tracked here** — `CLAUDE.md`, this file and `.agents/`.
+
+**The public-repo and generated-fixture rules are already stated above** and are
+not repeated here — but note that this repo is the worked example the bundle's
+constitution cites for *generate rather than sanitise*, so those two rules are
+the ones a future edit must not quietly soften.
+
+**An agent commits only in the repo it was invoked in.** A lesson for a sibling
+is ported by filing a linked issue in that repo's project.

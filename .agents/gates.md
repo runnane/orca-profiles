@@ -1,8 +1,10 @@
-# LOCAL — the gates in this repo
+# The gates in this repo
 
-**Never synced.** This file is orca-profiles' own; a difference from a sibling
-repo's copy is not drift. The byte-identical rules live in
-[`../shared/`](../shared/).
+`.agents/repo.json` names this file as `gatesDoc`, which is how a repo-agnostic
+command finds this repo's particulars without carrying them. Its counterpart is
+the **`gate-failures` skill** in the userspace bundle: that one names no command
+or runner, so it can be shared; this one is nothing but commands and runners, so
+it never leaves the repo.
 
 ## The command
 
