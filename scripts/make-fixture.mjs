@@ -17,7 +17,7 @@
  * Deterministic: same output every run, so a test can assert exact counts.
  */
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const ROOT = new URL('../fixtures/config', import.meta.url).pathname;
@@ -70,7 +70,16 @@ function bulkSettings(seed = 0) {
   return out;
 }
 
-rmSync(ROOT, { recursive: true, force: true });
+// Empty the directory's *contents*, not the directory itself. ORCA-35: a
+// container started with `-v $PWD/fixtures/config:/config:ro` binds on this
+// directory's inode, and rmSync-ing the directory (then recreating it under
+// the same name) leaves that mount pointing at the deleted one — `/config`
+// reads empty inside the container from then on, however many times the
+// fixture is regenerated afterwards.
+mkdirSync(ROOT, { recursive: true });
+for (const entry of readdirSync(ROOT)) {
+  rmSync(join(ROOT, entry), { recursive: true, force: true });
+}
 
 // ─── system bundles ────────────────────────────────────────────────────────
 // Two vendors. The base names mirror OrcaSlicer's own (`fdm_*`), which are
