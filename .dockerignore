@@ -7,3 +7,6 @@ e2e/screenshots
 test-results
 playwright-report
 public/sample-config.json
+# Agent worktrees live under .claude/worktrees/ — each a full checkout with its
+# own node_modules. Docker does not read .gitignore, so exclude them here.
+.claude
