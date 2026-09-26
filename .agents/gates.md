@@ -28,6 +28,24 @@ missing `fixtures/` cannot make a run pass or fail spuriously.
 Run the smoke test when you touch anything under `src/ui/`. Run `test:server`
 when you touch `src/server/`, `src/source/http.ts`, the Dockerfile or compose.
 
+`test:server` needs a running container, and on a public repo the only
+acceptable one to test against is the generated fixture, never a real config:
+
+```bash
+pnpm fixture && pnpm docker:build && ORCA_CONFIG=$PWD/fixtures/config pnpm docker:run
+# in another shell, once the container is up:
+pnpm test:server   # ORCA_URL defaults to http://localhost:8099, docker:run's published port
+```
+
+`test:server` runs under `playwright.server.config.ts`, which has no
+`webServer` of its own — unlike `playwright.config.ts` (used by `pnpm smoke`),
+it never runs `pnpm build`, so it never regenerates the fixture out from under
+the container (ORCA-35). Regenerating the fixture at all (`pnpm fixture`,
+which `pnpm test` and therefore `pnpm gates` also run) is safe to do while a
+container has `fixtures/config` bind-mounted: `scripts/make-fixture.mjs` empties
+the directory's contents rather than removing the directory, so the inode a
+bind mount is attached to survives.
+
 ## CI
 
 `.github/workflows/ci.yml`, `pull_request` only, `ubuntu-latest`. This repo is
